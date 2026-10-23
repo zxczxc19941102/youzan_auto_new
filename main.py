@@ -19,7 +19,7 @@
   - 再次点「开始登录」：先结束所有正在运行的登录服务(worker+浏览器)，再重启登录。
 
 线程模型：所有 Playwright 操作都在 worker 线程里执行；GUI 线程只发信号(Event)，绝不直接调 Playwright
-         （Playwright sync 连接绑定线程，跨线程调用会报 "Playwright connection closed"）。
+         （Playwright sync 1连接绑定线程，跨线程调用会报 "Playwright connection closed"）。
 """
 import os
 import sys
