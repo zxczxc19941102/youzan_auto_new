@@ -22,7 +22,7 @@ SMS_CODE_FILE = os.path.join(TXT_DIR, 'sms_code.txt')
 
 # 默认账号（可在界面里改）
 DEFAULT_USER = '13250866726'
-DEFAULT_PWD = 'Aa09149101++'
+DEFAULT_PWD = '123456'
 
 # 浏览器
 HEADLESS = True                 # True=后台无浏览器窗口；False=弹窗调试用
