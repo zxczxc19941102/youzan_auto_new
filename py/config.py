@@ -1,7 +1,12 @@
 # -*- coding: utf-8 -*-
 """全局配置：URL、文件路径、默认账号、浏览器参数。集中修改，避免散落在各模块。"""
+import base64
+import ctypes
+import json
 import os
+import tempfile
 import time
+from ctypes import wintypes
 
 # 目录（config.py 在 py/ 下，项目根目录是它的上一级）
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -22,10 +27,131 @@ AUTH_FILE = os.path.join(JSON_DIR, 'auth_state.json')
 SMS_CODE_FILE = os.path.join(TXT_DIR, 'sms_code.txt')
 
 # 默认账号（可在界面里改）；凭据从环境变量读取，避免提交到仓库。
-DEFAULT_USER = os.environ.get('YOUZAN_USER', '')
-DEFAULT_PWD = os.environ.get('YOUZAN_PASSWORD', '')
+# Local GUI settings. The file is ignored by Git and stays on this computer.
+LOCAL_CONFIG_FILE = os.path.join(JSON_DIR, 'local_config.json')
 
-# 浏览器
+
+def _load_local_config():
+    try:
+        with open(LOCAL_CONFIG_FILE, 'r', encoding='utf-8') as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+class _DataBlob(ctypes.Structure):
+    _fields_ = [
+        ('cbData', wintypes.DWORD),
+        ('pbData', ctypes.POINTER(ctypes.c_byte)),
+    ]
+
+
+def _dpapi_transform(value, decrypt=False):
+    """Protect/unprotect a secret with Windows user-scoped DPAPI."""
+    if os.name != 'nt':
+        return None
+    raw = value if isinstance(value, bytes) else str(value).encode('utf-8')
+    input_buffer = ctypes.create_string_buffer(raw)
+    input_blob = _DataBlob(
+        len(raw), ctypes.cast(input_buffer, ctypes.POINTER(ctypes.c_byte))
+    )
+    output_blob = _DataBlob()
+    if decrypt:
+        ok = ctypes.windll.crypt32.CryptUnprotectData(
+            ctypes.byref(input_blob), None, None, None, None, 0,
+            ctypes.byref(output_blob)
+        )
+    else:
+        ok = ctypes.windll.crypt32.CryptProtectData(
+            ctypes.byref(input_blob), None, None, None, None, 0,
+            ctypes.byref(output_blob)
+        )
+    if not ok:
+        return None
+    try:
+        return ctypes.string_at(output_blob.pbData, output_blob.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(output_blob.pbData)
+
+
+def _protect_password(password):
+    protected = _dpapi_transform(password, decrypt=False)
+    if protected is None:
+        raise RuntimeError('Windows DPAPI password protection failed')
+    return 'dpapi:' + base64.b64encode(protected).decode('ascii')
+
+
+def _unprotect_password(value):
+    if not value:
+        return ''
+    if not str(value).startswith('dpapi:'):
+        # Compatibility with an older local_config.json created before DPAPI.
+        return str(value)
+    try:
+        protected = base64.b64decode(str(value)[6:])
+        raw = _dpapi_transform(protected, decrypt=True)
+        return raw.decode('utf-8') if raw is not None else ''
+    except (ValueError, TypeError, UnicodeError):
+        return ''
+
+
+def _as_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ('1', 'true', 'yes', 'on', 'y')
+    if value is None:
+        return default
+    return bool(value)
+
+
+_LOCAL_CONFIG = _load_local_config()
+
+# Environment variables take precedence over the saved local settings.
+DEFAULT_USER = os.environ.get('YOUZAN_USER') or str(_LOCAL_CONFIG.get('username', ''))
+DEFAULT_PWD = os.environ.get('YOUZAN_PASSWORD') or _unprotect_password(
+    _LOCAL_CONFIG.get('password_protected', _LOCAL_CONFIG.get('password', ''))
+)
+DEFAULT_AUTO_SHOP_LIST = _as_bool(_LOCAL_CONFIG.get('auto_shop_list'), True)
+DEFAULT_AUTO_FILL_ALL = _as_bool(_LOCAL_CONFIG.get('auto_fill_all'), True)
+DEFAULT_FILL_ALL_DRY = _as_bool(_LOCAL_CONFIG.get('fill_all_dry'), False)
+try:
+    DEFAULT_WORKERS = max(1, min(10, int(_LOCAL_CONFIG.get('workers', 3))))
+except (TypeError, ValueError):
+    DEFAULT_WORKERS = 3
+
+
+def save_local_config(username, password, auto_shop_list=True,
+                      auto_fill_all=True, fill_all_dry=False, workers=3):
+    """Atomically save ignored local GUI settings."""
+    ensure_dirs()
+    payload = {
+        'username': str(username or ''),
+        'password_protected': _protect_password(password or ''),
+        'auto_shop_list': bool(auto_shop_list),
+        'auto_fill_all': bool(auto_fill_all),
+        'fill_all_dry': bool(fill_all_dry),
+        'workers': max(1, min(10, int(workers))),
+    }
+    fd, temp_path = tempfile.mkstemp(
+        prefix='.local_config_', suffix='.tmp', dir=JSON_DIR
+    )
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write('\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, LOCAL_CONFIG_FILE)
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
 HEADLESS = True                 # True=后台无浏览器窗口；False=弹窗调试用
 BROWSER_CHANNEL = 'msedge'      # 复用系统 Edge，免下载 chromium
 VIEWPORT = {'width': 1280, 'height': 800}

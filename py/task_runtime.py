@@ -26,15 +26,27 @@ class DaemonThreadPoolExecutor(ThreadPoolExecutor):
         if count >= self._max_workers:
             return
         name = '%s_%d' % (self._thread_name_prefix or self, count)
+        # CPython 3.14 changed ThreadPoolExecutor internals: _worker now
+        # receives a prepared WorkerContext and ThreadPoolExecutor no longer
+        # exposes _initializer/_initargs. Keep the daemon-thread behavior
+        # while supporting both the new and old private APIs.
+        if hasattr(self, '_create_worker_context'):
+            worker_args = (
+                weakref.ref(self, wake_executor),
+                self._create_worker_context(),
+                self._work_queue,
+            )
+        else:
+            worker_args = (
+                weakref.ref(self, wake_executor),
+                self._work_queue,
+                getattr(self, '_initializer', None),
+                getattr(self, '_initargs', ()),
+            )
         worker = threading.Thread(
             name=name,
             target=futures_thread._worker,
-            args=(
-                weakref.ref(self, wake_executor),
-                self._work_queue,
-                self._initializer,
-                self._initargs,
-            ),
+            args=worker_args,
             daemon=True,
         )
         worker.start()

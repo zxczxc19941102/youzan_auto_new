@@ -295,12 +295,39 @@ def enable_code_ui():
 
 
 def _read_workers():
-    """读取下拉框并发数：限制在 1~10，默认 3（偏低并发更稳，减少“操作太快”）。"""
+    """Read and clamp the worker count from the GUI."""
     try:
-        value = int(worker_count_var.get()) if worker_count_var else 3
+        value = int(worker_count_var.get()) if worker_count_var else config.DEFAULT_WORKERS
     except Exception:
-        value = 3
+        value = config.DEFAULT_WORKERS
     return max(1, min(10, value))
+
+
+def _read_ui_settings():
+    """Read Tk variables on the Tk thread before handing work to workers."""
+    return {
+        'auto_shop_list': bool(auto_shop_list_var and auto_shop_list_var.get()),
+        'auto_fill_all': bool(auto_fill_all_var and auto_fill_all_var.get()),
+        'fill_all_dry': bool(fill_all_dry_var and fill_all_dry_var.get()),
+        'workers': _read_workers(),
+    }
+
+
+def _save_login_config(user, pwd, settings):
+    """Save local GUI settings after successful login; never log the password."""
+    if not user or not pwd:
+        return
+    try:
+        config.save_local_config(
+            user, pwd,
+            auto_shop_list=settings.get('auto_shop_list', True),
+            auto_fill_all=settings.get('auto_fill_all', True),
+            fill_all_dry=settings.get('fill_all_dry', False),
+            workers=settings.get('workers', config.DEFAULT_WORKERS),
+        )
+        log('\u672c\u673a\u914d\u7f6e\u5df2\u4fdd\u5b58\uff1a\u8d26\u53f7\u3001\u5bc6\u7801\u53ca\u754c\u9762\u9009\u9879\uff08\u4ec5\u672c\u5730\u6587\u4ef6\uff0c\u4e0d\u4e0a\u4f20\uff09')
+    except Exception as exc:
+        log('\u672c\u673a\u914d\u7f6e\u4fdd\u5b58\u5931\u8d25\uff1a%r' % exc)
 
 
 def _set_running_ui(running):
@@ -413,13 +440,13 @@ def _wait_code_input(timeout=1200):
     return ''
 
 
-def _auto_followup_after_login(bot_obj):
+def _auto_followup_after_login(bot_obj, settings):
     """登录成功后统计店铺，并按勾选执行全量跟进记录（全程步骤计时）。"""
     from followup_batch import FollowupBatch
     from shop_list_reader import ShopListReader
 
-    auto_fill_all = bool(auto_fill_all_var and auto_fill_all_var.get())
-    show_shop_list = bool(auto_shop_list_var and auto_shop_list_var.get())
+    auto_fill_all = bool(settings.get('auto_fill_all', True))
+    show_shop_list = bool(settings.get('auto_shop_list', True))
     rt = runner
     debug_log = _make_debug_log('shop_list_run')
     batch = FollowupBatch(bot_obj, raw_log, styled_log, debug_log, runtime=rt)
@@ -465,8 +492,8 @@ def _auto_followup_after_login(bot_obj):
         log('已取消，跳过全量跟进')
         return
 
-    dry_run = bool(fill_all_dry_var and fill_all_dry_var.get())
-    workers = _read_workers()
+    dry_run = bool(settings.get('fill_all_dry', False))
+    workers = max(1, min(10, int(settings.get('workers', config.DEFAULT_WORKERS))))
     fill_debug = _make_debug_log('fill_all')
     fill_debug('全量跟进：workers=%d dry_run=%s skip_done=%s' % (
         workers, dry_run, not bool(already)
@@ -503,7 +530,7 @@ def _auto_followup_after_login(bot_obj):
     fill_debug('全量跟进结果：%s' % result)
 
 
-def login_worker(user, pwd):
+def login_worker(user, pwd, settings):
     """一次完整登录尝试：免密(可选) -> 常规 -> 短信(一次性)。"""
     global bot
     rt = runner
@@ -529,7 +556,8 @@ def login_worker(user, pwd):
             if mfree_ok:
                 fresh_login_requested['v'] = False
                 log('登录工作台成功')
-                _auto_followup_after_login(b)
+                _save_login_config(user, pwd, settings)
+                _auto_followup_after_login(b, settings)
                 return
             fresh_login_requested['v'] = True
             log('免密登录失败，转账号密码登录')
@@ -578,7 +606,8 @@ def login_worker(user, pwd):
             logged_in = b._is_logged_in()
             outcome['value'] = '已登录' if logged_in else '未确认登录'
         log('登录工作台成功')
-        _auto_followup_after_login(b)
+        _save_login_config(user, pwd, settings)
+        _auto_followup_after_login(b, settings)
     except TaskCancelled:
         log('已被终止，中断于步骤:登录流程')
     except Exception as e:
@@ -592,7 +621,7 @@ def login_worker(user, pwd):
         bot = None
 
 
-def _mfree_login_task():
+def _mfree_login_task(user, pwd, settings):
     """一键免密登录任务：同样在线程池里执行。"""
     global bot
     rt = runner
@@ -608,7 +637,8 @@ def _mfree_login_task():
         if ok:
             fresh_login_requested['v'] = False
             log('登录工作台成功')
-            _auto_followup_after_login(b)
+            _save_login_config(user, pwd, settings)
+            _auto_followup_after_login(b, settings)
         else:
             fresh_login_requested['v'] = True
             log('免密登录失败，请点「开始登录」')
@@ -654,7 +684,8 @@ def on_start():
     rt.emit('✔ 完成:读取账号密码，关键结果:账号=%s 密码=***，耗时 %.4f 秒' % (
         _mask_account(user), read_elapsed
     ))
-    rt.submit('账号 %s' % _mask_account(user), login_worker, user, pwd)
+    settings = _read_ui_settings()
+    rt.submit('\u8d26\u53f7 %s' % _mask_account(user), login_worker, user, pwd, settings)
 
 
 def on_submit():
@@ -675,7 +706,10 @@ def on_ck():
         log_error('没有本地登录凭据，请先点「开始登录」')
         return
     rt = _start_runtime()
-    rt.submit('免密登录', _mfree_login_task)
+    user = (entry_user.get() or '').strip()
+    pwd = (entry_pwd.get() or '').strip()
+    settings = _read_ui_settings()
+    rt.submit('\u514d\u5bc6\u767b\u5f55', _mfree_login_task, user, pwd, settings)
 
 
 def on_close():
@@ -736,28 +770,28 @@ def run_gui():
     btn_ck = tk.Button(frm, text='一键免密登录', command=on_ck, width=12)
     btn_ck.grid(row=3, column=2, padx=6, pady=4)
 
-    auto_shop_list_var = tk.BooleanVar(value=True)
+    auto_shop_list_var = tk.BooleanVar(value=config.DEFAULT_AUTO_SHOP_LIST)
     tk.Checkbutton(
         frm,
         text='登录后读取店铺列表并输出日志（只读，不修改数据）',
         variable=auto_shop_list_var,
     ).grid(row=3, column=0, columnspan=2, sticky='w', pady=4)
 
-    auto_fill_all_var = tk.BooleanVar(value=True)
+    auto_fill_all_var = tk.BooleanVar(value=config.DEFAULT_AUTO_FILL_ALL)
     tk.Checkbutton(
         frm,
         text='登录后统计店铺并填写全部跟进记录（默认开启）',
         variable=auto_fill_all_var,
     ).grid(row=4, column=0, columnspan=2, sticky='w', pady=4)
 
-    fill_all_dry_var = tk.BooleanVar(value=False)
+    fill_all_dry_var = tk.BooleanVar(value=config.DEFAULT_FILL_ALL_DRY)
     tk.Checkbutton(
         frm, text='全量跟进试运行（只填表不发布）',
         variable=fill_all_dry_var,
     ).grid(row=5, column=0, sticky='w', pady=4)
 
     tk.Label(frm, text='并发线程').grid(row=5, column=1, sticky='e', padx=4)
-    worker_count_var = tk.StringVar(value='3')
+    worker_count_var = tk.StringVar(value=str(config.DEFAULT_WORKERS))
     ttk.Combobox(
         frm,
         textvariable=worker_count_var,

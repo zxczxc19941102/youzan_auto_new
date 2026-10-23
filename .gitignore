@@ -6,6 +6,7 @@ __pycache__/
 # 登录凭据（敏感）
 json/cookies.json
 json/auth_state.json
+json/local_config.json
 
 # 运行与调试产物
 html/

@@ -204,3 +204,127 @@ python main.py --test-followup       # 真实点击发布，会新增一条跟�
 - 取拼图必须读「当前可见容器」里的图（页面有隐藏模板节点），否则会拿到错误 token 的图。
 - Windows 控制台 GBK 会因 emoji/特殊字符崩溃，代码已强制 stdout/stderr 为 UTF-8。
 - 保存的 HTML 可能包含账号/客户等页面数据，仅保存在本地 `html/` 目录，不要随代码提交或外传。
+
+## 快速开始（Windows）
+
+项目提供了初始化脚本和启动脚本，首次运行建议按以下步骤操作：
+
+```powershell
+cd F:\youzan_auto
+Set-ExecutionPolicy -Scope Process Bypass
+.\setup.ps1
+.\run.cmd
+```
+
+`setup.ps1` 会自动完成以下工作：
+
+1. 创建项目虚拟环境 `venv`；
+2. 安装 `requirements.txt` 中的依赖；
+3. 检查核心模块是否能够导入；
+4. 检查系统 Microsoft Edge 是否存在。
+
+后续启动可以直接使用：
+
+```powershell
+.\run.cmd                         # 启动图形界面
+.\run.cmd --smoke                 # 无头冒烟检查
+.\run.cmd --list-shops             # 只读读取店铺列表
+.\run.cmd --fill-first3-dry        # 前 3 家安全试运行，不发布
+.\run.cmd --fill-all-dry           # 全量试运行，不发布
+.\run.cmd --fill-all --workers 3   # 全量真实发布，3 线程
+```
+
+也可以显式调用虚拟环境解释器：
+
+```powershell
+.\venv\Scripts\python.exe .\main.py
+```
+
+### 运行前检查
+
+- 操作系统：Windows；
+- Python：建议 3.10 及以上；Python 3.14 已兼容；
+- 浏览器：Microsoft Edge；
+- 网络：能够访问有赞登录页和业务接口；
+- 首次登录：准备好账号、密码，以及可能需要的短信验证码。
+
+## 本地配置与敏感数据
+
+登录成功后，程序会在项目本地生成以下文件：
+
+```text
+json/cookies.json       登录 Cookie/CK
+json/auth_state.json    Playwright 完整登录态
+json/local_config.json  账号、加密密码、复选框状态、并发数
+```
+
+`json/local_config.json` 中的密码使用 Windows 当前用户 DPAPI 加密保存，不保存明文密码。程序下次启动时会自动恢复：
+
+- 账号和密码；
+- 登录后读取店铺列表选项；
+- 自动填写全部跟进记录选项；
+- 全量跟进试运行选项；
+- 并发线程数。
+
+密码输入框使用掩码显示，日志只输出 `密码=***`，不会打印密码内容。上述登录态和本地配置均已加入 `.gitignore`，不会被 Git 跟踪；不要手动将 `json/` 目录中的敏感文件上传或发送给他人。
+
+如果需要使用环境变量覆盖本地配置：
+
+```powershell
+$env:YOUZAN_USER = '你的账号'
+$env:YOUZAN_PASSWORD = '你的密码'
+.\run.cmd
+```
+
+环境变量优先级高于 `json/local_config.json`。
+
+## GUI 选项说明
+
+- **登录后读取店铺列表并输出日志**：只读获取店铺，不修改数据；默认开启。
+- **登录后统计店铺并填写全部跟进记录**：登录成功后执行批量跟进；请确认业务数据后再开启。
+- **全量跟进试运行（只填表不发布）**：用于验证页面定位和表单流程，不点击发布；建议首次使用先开启。
+- **并发线程**：可选 1~10，默认 3。并发越高速度越快，但更容易触发页面限速或风控，建议从 1~3 开始。
+
+## 故障排查
+
+### `AttributeError: ... _initializer`
+
+这是旧版线程池代码与 Python 3.14 内部 API 变化导致的错误。当前版本已在 `py/task_runtime.py` 中兼容 Python 3.14；请重新执行 `setup.ps1` 后再启动。
+
+### `libpng warning: iCCP: known incorrect sRGB profile`
+
+这是验证码图片自带 ICC 色彩配置产生的 libpng 警告，不是登录失败原因。只要后续流程继续运行，通常可以忽略。
+
+### 找不到 Edge 或 Playwright 启动失败
+
+确认 Microsoft Edge 已安装并可正常打开。如果依赖损坏，执行：
+
+```powershell
+.\venv\Scripts\python.exe -m pip install --upgrade -r .\requirements.txt
+```
+
+项目默认复用系统 Edge，不需要额外下载 Chromium。
+
+### 短信验证码没有自动提交
+
+在 GUI 中输入 6 位数字验证码后点击「提交验证码」。命令行测试也可以通过环境变量或本地文件提供验证码：
+
+```powershell
+$env:YOUZAN_SMS_CODE = '123456'
+```
+
+### 登录态失效
+
+删除本地 `json/cookies.json` 和 `json/auth_state.json` 后重新登录。不要删除 `json/local_config.json`，否则账号、密码和界面设置也会被清除。
+
+## 开发自检
+
+提交代码前可以执行：
+
+```powershell
+$files = @('.\main.py') + (Get-ChildItem .\py -Filter *.py | ForEach-Object FullName) + (Get-ChildItem .\tests -Filter *.py | ForEach-Object FullName)
+.\venv\Scripts\python.exe -m py_compile $files
+.\venv\Scripts\python.exe .\tests\test_verify_false_negative.py
+.\venv\Scripts\python.exe .\tests\test_publish_wait.py
+git diff --check
+```
