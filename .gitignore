@@ -1,0 +1,13 @@
+# Python / 虚拟环境
+venv/
+__pycache__/
+*.py[cod]
+
+# 登录凭据（敏感）
+json/cookies.json
+json/auth_state.json
+
+# 运行与调试产物
+html/
+txt/
+png/
