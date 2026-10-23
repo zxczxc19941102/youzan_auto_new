@@ -261,9 +261,11 @@ class YouzanBot:
             page.get_by_text('密码登录', exact=True).click()
             time.sleep(0.5)
 
-            self.log('填写账号密码')
+            self.log('登录工作台')
+            self.log('输入账号密码中')
             page.get_by_role('textbox', name='请输入手机号').fill(user)
             page.get_by_role('textbox', name='输入登录密码').fill(pwd)
+            self.log('输入完成')
             al = page.get_by_role('checkbox', name=re.compile('3\\s*天内自动登录'))
             if al.count() != 1:
                 raise RuntimeError('无法唯一定位「3天内自动登录」复选框')
@@ -280,7 +282,7 @@ class YouzanBot:
             self.log('点击登录')
             page.get_by_role('button', name=re.compile('登\\s*录')).click()
 
-            self.log('等待滑块出现')
+            self.log('滑块验证中')
             slider_ok = self._solve_slider()
             phone = False
             logged_in = False
@@ -355,7 +357,7 @@ class YouzanBot:
             bgw = Image.open(io.BytesIO(bg)).size[0]
             scale = info['bigCssW'] / bgw
             dist = x * scale - info['blockLeft']
-            self.log('拼图#%d x=%d y=%d score=%.1f 拖动=%.1fpx' % (attempt + 1, x, y, score, dist))
+            self.log('坐标X=%d Y=%d，拖动距离=%.1fpx' % (x, y, dist))
             human_drag(page, dist, info['handleCx'], info['handleCy'])
             time.sleep(3.2)
             still = True
@@ -370,7 +372,7 @@ class YouzanBot:
                         raise
                     time.sleep(0.25)
             if not still:
-                self.log('滑块通过 OK')
+                self.log('验证完成')
                 return True
             self.log('滑块第%d次未通过，刷新重试' % (attempt + 1))
             time.sleep(1.8)

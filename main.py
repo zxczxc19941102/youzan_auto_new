@@ -199,64 +199,138 @@ def _stop_all_services():
     return True
 
 
-def _auto_followup_after_login(bot_obj):
-    """登录成功后按 GUI 勾选执行跟进记录和/或店铺列表读取。"""
-    did_something = False
+def _confirm_repeat_followup(done_count):
+    """在 GUI 主线程询问是否重复填写当天已有记录。"""
+    if root is None:
+        return False
 
-    if auto_fill_all_var and auto_fill_all_var.get():
+    answer = {'yes': False}
+    decided = threading.Event()
+
+    def ask():
+        try:
+            answer['yes'] = messagebox.askyesno(
+                '重复填写确认',
+                '检测到今天已经填写过 %d 条跟进记录，是否还需要再填写一次？'
+                % done_count,
+                parent=root,
+            )
+        except Exception:
+            answer['yes'] = False
+        finally:
+            decided.set()
+
+    try:
+        root.after(0, ask)
+    except Exception:
+        return False
+
+    while not decided.wait(0.2):
+        if stop_flag.is_set():
+            return False
+    return answer['yes']
+
+
+def _auto_followup_after_login(bot_obj):
+    """登录成功后先统计店铺，再按 GUI 勾选执行跟进记录和/或列表读取。"""
+    from followup_batch import FollowupBatch
+    from shop_list_reader import ShopListReader
+
+    auto_fill_all = bool(auto_fill_all_var and auto_fill_all_var.get())
+    auto_followup = bool(auto_followup_var and auto_followup_var.get())
+    show_shop_list = bool(auto_shop_list_var and auto_shop_list_var.get())
+    debug_log = _make_debug_log('shop_list_run')
+    batch = FollowupBatch(bot_obj, raw_log, styled_log, debug_log)
+    reader = batch.reader
+
+    try:
+        debug_log('开始读取店铺列表（只读）')
+        # 先静默收集完整列表，确保总数出现在店铺明细之前。
+        reader = ShopListReader(bot_obj, lambda message: None, debug=debug_log)
+        list_result = reader.run()
+        shops = reader.shops
+        batch.reader = reader
+        debug_log('店铺列表读取结果：success=%s count=%s' % (
+            list_result.get('success'), list_result.get('count', 0)
+        ))
+        raw_log('当前检索到店铺一共%d个' % len(shops))
+        if show_shop_list:
+            for index, shop in enumerate(shops):
+                block = reader._shop_block_lines(shop)
+                if index:
+                    block = block[1:]
+                raw_log('\n'.join(block))
+    except Exception as exc:
+        debug_log('登录后店铺统计异常：%r' % exc)
+        log('登录后店铺统计失败：%r' % exc)
+        shops = []
+
+    if stop_flag.is_set():
+        log('已取消，跳过跟进记录自动化')
+        return
+    if not auto_fill_all and not auto_followup:
+        return
+
+    today_ids = batch.load_done_ids() | batch.today_visit_ids(shops)
+    if auto_fill_all:
+        already_done_shops = [
+            shop for shop in shops if batch.shop_ids(shop) & today_ids
+        ]
+        already_done_count = len(already_done_shops)
+        if already_done_count:
+            log('检测到今天已有跟进记录的店铺：%d 家' % already_done_count)
+            if not _confirm_repeat_followup(already_done_count):
+                log('已选择不重复填写，跳过跟进记录')
+                return
         if stop_flag.is_set():
             log('已取消，跳过全量跟进')
-        else:
-            debug_log = _make_debug_log('fill_all')
-            dry_run = bool(fill_all_dry_var and fill_all_dry_var.get())
-            try:
-                workers = int(worker_count_var.get()) if worker_count_var else 1
-            except Exception:
-                workers = 1
-            debug_log('全量跟进：workers=%d dry_run=%s' % (workers, dry_run))
-            try:
-                from followup_batch import FollowupBatch
-                result = FollowupBatch(
-                    bot_obj, raw_log, styled_log, debug_log, dry_run=dry_run
-                ).run(all_shops=True, workers=workers)
-                debug_log('全量跟进结果：%s' % result)
-            except Exception as exc:
-                debug_log('全量跟进异常：%r' % exc)
+            return
+
+        fill_debug = _make_debug_log('fill_all')
+        dry_run = bool(fill_all_dry_var and fill_all_dry_var.get())
+        try:
+            workers = int(worker_count_var.get()) if worker_count_var else 1
+        except Exception:
+            workers = 1
+        fill_debug('全量跟进：workers=%d dry_run=%s' % (workers, dry_run))
+        try:
+            fill_batch = FollowupBatch(
+                bot_obj, raw_log, styled_log, fill_debug, dry_run=dry_run
+            )
+            fill_batch.reader = reader
+            result = fill_batch.run(
+                all_shops=True,
+                workers=workers,
+                skip_done=not bool(already_done_count),
+                shops=shops,
+                announce_count=False,
+                done_ids=today_ids,
+            )
+            fill_debug('全量跟进结果：%s' % result)
+        except Exception as exc:
+            fill_debug('全量跟进异常：%r' % exc)
         return
 
-    if auto_followup_var and auto_followup_var.get():
+    if auto_followup:
+        from shop_followup import SHOP_ID, ShopFollowupCase
+
+        target_done = SHOP_ID in today_ids
+        if target_done:
+            log('检测到该店铺今天已经填写过跟进记录')
+            if not _confirm_repeat_followup(1):
+                log('已选择不重复填写，跳过跟进记录')
+                return
         if stop_flag.is_set():
             log('已取消，跳过跟进记录自动化')
-        else:
-            log('开始填写跟进记录')
-            try:
-                from shop_followup import ShopFollowupCase
-                case = ShopFollowupCase(bot_obj, log, dry_run=False)
-                result = case.run()
-                if not result.get('success'):
-                    log('跟进记录失败：%s' % result.get('error', '未知错误'))
-            except Exception as exc:
-                log('跟进记录异常：%r' % exc)
-            did_something = True
-
-    if auto_shop_list_var and auto_shop_list_var.get():
-        if stop_flag.is_set():
-            log('已取消，跳过店铺列表读取')
-        else:
-            debug_log = _make_debug_log('shop_list_run')
-            debug_log('开始读取店铺列表（只读）')
-            try:
-                from shop_list_reader import ShopListReader
-                list_result = ShopListReader(bot_obj, raw_log, debug=debug_log).run()
-                debug_log('店铺列表读取结果：success=%s count=%s' % (
-                    list_result.get('success'), list_result.get('count', 0)
-                ))
-            except Exception as exc:
-                debug_log('店铺列表读取异常：%r' % exc)
-            did_something = True
-
-    if not did_something:
-        return
+            return
+        log('开始填写跟进记录')
+        try:
+            case = ShopFollowupCase(bot_obj, log, dry_run=False)
+            result = case.run()
+            if not result.get('success'):
+                log('跟进记录失败：%s' % result.get('error', '未知错误'))
+        except Exception as exc:
+            log('跟进记录异常：%r' % exc)
 
 
 def login_worker(user, pwd):
@@ -471,7 +545,7 @@ def run_gui():
     auto_followup_var = tk.BooleanVar(value=False)
     tk.Checkbutton(
         frm,
-        text='登录成功后自动填写并发布跟进记录（默认关闭，避免重复发布）',
+        text='登录后填写指定店铺跟进记录（单条任务）',
         variable=auto_followup_var,
     ).grid(row=3, column=0, columnspan=2, sticky='w', pady=4)
 
@@ -482,14 +556,14 @@ def run_gui():
         variable=auto_shop_list_var,
     ).grid(row=4, column=0, columnspan=2, sticky='w', pady=4)
 
-    auto_fill_all_var = tk.BooleanVar(value=False)
+    auto_fill_all_var = tk.BooleanVar(value=True)
     tk.Checkbutton(
         frm,
-        text='登录后全量填写跟进记录（勾选后覆盖上面的单条/列表任务）',
+        text='登录后统计店铺并填写全部跟进记录（默认开启）',
         variable=auto_fill_all_var,
     ).grid(row=5, column=0, columnspan=2, sticky='w', pady=4)
 
-    fill_all_dry_var = tk.BooleanVar(value=True)
+    fill_all_dry_var = tk.BooleanVar(value=False)
     tk.Checkbutton(
         frm, text='全量跟进试运行（只填表不发布）',
         variable=fill_all_dry_var,

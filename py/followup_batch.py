@@ -3,6 +3,7 @@
 import html
 import json
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -45,7 +46,7 @@ class FollowupBatch:
         return shops
 
     def load_done_ids(self):
-        """只跳过当天已成功的店铺；昨天的记录不影响今天。"""
+        """读取当天已成功发布的店铺 ID；试运行和其他日期不计入。"""
         done = set()
         today = time.strftime('%Y%m%d')
         for path in Path(config.TXT_DIR).glob('followup_batch_*.json'):
@@ -60,6 +61,37 @@ class FollowupBatch:
                         done.add(str(item['shop_id']))
             except Exception:
                 continue
+        for path in Path(config.TXT_DIR).glob('followup_test_result_*.json'):
+            if today not in path.stem:
+                continue
+            try:
+                data = json.loads(path.read_text(encoding='utf-8'))
+                if data.get('dry_run') or not data.get('success'):
+                    continue
+                shop_id = data.get('shop_id')
+                if shop_id:
+                    done.add(str(shop_id))
+            except Exception:
+                continue
+        return done
+
+    @staticmethod
+    def shop_ids(shop):
+        return {
+            str(shop.get(key)).strip()
+            for key in ('kdt_id', 'shop_id')
+            if shop.get(key) is not None and str(shop.get(key)).strip()
+        }
+
+    def today_visit_ids(self, shops):
+        """从店铺列表最近拜访日期中识别今天已有记录的店铺。"""
+        today = time.strftime('%Y%m%d')
+        done = set()
+        for shop in shops:
+            last_visit = str(shop.get('last_visit') or '')
+            visit_date = ''.join(re.findall(r'\d+', last_visit))[:8]
+            if visit_date == today:
+                done.update(self.shop_ids(shop))
         return done
 
     def load_all_shops(self):
@@ -326,19 +358,32 @@ class FollowupBatch:
                     self.debug('并发任务异常：%r' % exc)
                     self.stop_event.set()
 
-    def run(self, count=3, skip=0, all_shops=False, workers=1, skip_done=True):
-        shops = self.load_all_shops() if all_shops else self.load_first_page()
-        self.raw('当前检索到店铺一共%d个' % len(shops))
+    def run(
+        self,
+        count=3,
+        skip=0,
+        all_shops=False,
+        workers=1,
+        skip_done=True,
+        shops=None,
+        announce_count=True,
+        done_ids=None,
+    ):
+        if shops is None:
+            shops = self.load_all_shops() if all_shops else self.load_first_page()
+        if announce_count:
+            self.raw('当前检索到店铺一共%d个' % len(shops))
         if all_shops:
             targets = shops[skip:]
         else:
             targets = shops[skip:skip + count]
         if skip_done:
-            done = self.load_done_ids()
+            done = set(done_ids or ())
+            done.update(self.load_done_ids())
             before = len(targets)
             targets = [
                 shop for shop in targets
-                if str(shop.get('kdt_id') or shop.get('shop_id') or '') not in done
+                if not (self.shop_ids(shop) & done)
             ]
             skipped = before - len(targets)
             if skipped:
