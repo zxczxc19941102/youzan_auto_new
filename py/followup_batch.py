@@ -3,38 +3,84 @@
 import html
 import json
 import os
+import random
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
+from concurrent.futures import wait as wait_futures
 from pathlib import Path
 from types import SimpleNamespace
 
 import config
 from shop_followup import ShopFollowupCase
 from shop_list_reader import SEPARATOR, SHOP_LIST_URL, ShopListReader
+from task_runtime import TaskCancelled
 from youzan_bot import YouzanBot
 
 
 class FollowupBatch:
-    def __init__(self, bot, raw_log, styled_log, debug_log, dry_run=False):
+    def __init__(
+        self, bot, raw_log, styled_log, debug_log, dry_run=False,
+        runtime=None, executor=None, publish_lock=None,
+    ):
         self.bot = bot
         self.page = bot.page
         self.raw = raw_log
         self.styled = styled_log
         self.debug = debug_log
         self.dry_run = dry_run
+        self.runtime = runtime
+        # 并发上限由 GUI 下拉框决定；有 runtime 时复用它的受控线程池
+        self.executor = executor or (runtime.executor if runtime else None)
+        self.stop_event = (
+            runtime.stop_event if runtime is not None else threading.Event()
+        )
+        self.abort_event = threading.Event()   # 批次内失败快速停止，不混同全局取消
+        # Same-account writes are serialized by the server; keep reads and
+        # form filling concurrent, but protect the publish critical section.
+        self.publish_lock = publish_lock or threading.Lock()
         self.run_id = time.strftime('%Y%m%d_%H%M%S')
-        self.reader = ShopListReader(bot, lambda message: None, debug=debug_log)
+        self.reader = ShopListReader(
+            bot, lambda message: None, debug=debug_log, runtime=runtime
+        )
         self.results = []
+        self.total_targets = 0
         self._print_lock = threading.Lock()
-        self.stop_event = threading.Event()
+
+    def _halted(self):
+        return self.abort_event.is_set() or self.stop_event.is_set()
+
+    def _check(self):
+        if self.stop_event.is_set():
+            raise TaskCancelled()
+        if self.abort_event.is_set():
+            raise RuntimeError('批次已因失败停止')
+
+    def _pace(self):
+        """请求之间随机限速，避免高频空转压垮本机和对端。"""
+        self._check()
+        delay = random.uniform(config.RATE_LIMIT_MIN, config.RATE_LIMIT_MAX)
+        if self.stop_event.wait(delay):
+            raise TaskCancelled()
+
+    def _note(self, message):
+        """进度明细：有运行时走统一日志，否则用原始输出。"""
+        if self.runtime is not None:
+            self.runtime.emit(message)
+        else:
+            self.raw(message)
 
     def load_first_page(self):
+        self._check()
         self.reader._attach()
         self.debug('打开店铺列表：%s' % SHOP_LIST_URL)
-        self.page.goto(SHOP_LIST_URL, wait_until='domcontentloaded')
-        self.page.wait_for_timeout(1500)
+        self.page.goto(
+            SHOP_LIST_URL,
+            wait_until='domcontentloaded',
+            timeout=config.NAV_TIMEOUT_MS,
+        )
+        self.reader._sleep(1.5)
         if not self.reader._wait_data(1):
             self.debug('店铺列表第一页未加载出数据')
             return []
@@ -95,16 +141,22 @@ class FollowupBatch:
         return done
 
     def load_all_shops(self):
+        self._check()
         self.reader._attach()
         self.debug('打开店铺列表：%s' % SHOP_LIST_URL)
-        self.page.goto(SHOP_LIST_URL, wait_until='domcontentloaded')
-        self.page.wait_for_timeout(1500)
+        self.page.goto(
+            SHOP_LIST_URL,
+            wait_until='domcontentloaded',
+            timeout=config.NAV_TIMEOUT_MS,
+        )
+        self.reader._sleep(1.5)
         if not self.reader._wait_data(1):
             self.debug('店铺列表未加载出数据')
             return []
         shops = []
         page_no = 1
         while page_no <= 100:
+            self._check()
             self.reader._wait_data(page_no)
             page_numbers = self.reader._page_numbers()
             max_page = max(page_numbers) if page_numbers else page_no
@@ -119,8 +171,10 @@ class FollowupBatch:
         return shops
 
     def _fill_one(self, shop, index):
+        self._check()
         name = shop.get('shop_name') or ''
         shop_id = shop.get('kdt_id') or shop.get('shop_id') or ''
+        self.debug('开始填写：%s（ID=%s）' % (name or '-', shop_id or '-'))
         detail_url, popup = self.reader.open_detail_popup(shop)
         success = False
         error = ''
@@ -129,7 +183,13 @@ class FollowupBatch:
         if page_obj is None and detail_url:
             try:
                 page_obj = self.page.context.new_page()
-                page_obj.goto(detail_url, wait_until='domcontentloaded')
+                page_obj.goto(
+                    detail_url,
+                    wait_until='domcontentloaded',
+                    timeout=config.NAV_TIMEOUT_MS,
+                )
+            except TaskCancelled:
+                raise
             except Exception as exc:
                 error = repr(exc)
                 page_obj = None
@@ -146,10 +206,18 @@ class FollowupBatch:
                     shop_id=str(shop_id),
                     detail_url=detail_url,
                     run_id='%s_%02d' % (self.run_id, index),
+                    runtime=self.runtime,
+                    publish_lock=self.publish_lock,
                 )
                 result = case.run()
                 success = bool(result.get('success'))
                 error = result.get('error', '')
+            except TaskCancelled:
+                self._record_result(
+                    shop, detail_url, False, '已终止',
+                    result.get('steps', []), cancelled=True,
+                )
+                raise
             except Exception as exc:
                 error = repr(exc)
             finally:
@@ -162,10 +230,12 @@ class FollowupBatch:
         self._record_result(shop, detail_url, success, error, steps)
         return success
 
-    def _record_result(self, shop, detail_url, success, error, steps):
+    def _record_result(self, shop, detail_url, success, error, steps,
+                       cancelled=False):
         with self._print_lock:
-            self.raw('正在进入店铺：%s' % (shop.get('shop_name') or '-'))
-            self._emit_steps(steps)
+            if not success:
+                self.raw('正在进入店铺：%s' % (shop.get('shop_name') or '-'))
+                self._emit_steps(steps)
             self._emit_block(
                 shop.get('shop_name') or '',
                 shop.get('kdt_id') or shop.get('shop_id') or '',
@@ -177,6 +247,7 @@ class FollowupBatch:
                 'shop_id': shop.get('kdt_id') or shop.get('shop_id') or '',
                 'detail_url': detail_url,
                 'success': success,
+                'cancelled': bool(cancelled),
                 'error': error,
                 'steps': steps,
             })
@@ -223,14 +294,15 @@ class FollowupBatch:
     def _summary(self):
         attempted = len(self.results)
         success = sum(1 for item in self.results if item['success'])
-        failed = attempted - success
-        self.raw(
-            '填写 %d 条记录已完成，填写成功 %d 条，失败 %d 条。'
-            % (attempted, success, failed)
+        cancelled = sum(1 for item in self.results if item.get('cancelled'))
+        failed = attempted - success - cancelled
+        self.debug(
+            '填写 %d 条记录已完成，填写成功 %d 条，失败 %d 条，终止 %d 条。'
+            % (attempted, success, failed, cancelled)
         )
-        return attempted, success, failed
+        return attempted, success, failed, cancelled
 
-    def _save_report(self, attempted, success, failed):
+    def _save_report(self, attempted, success, failed, cancelled=0):
         json_path = os.path.join(
             config.TXT_DIR, 'followup_batch_%s.json' % self.run_id
         )
@@ -239,6 +311,7 @@ class FollowupBatch:
                 'attempted': attempted,
                 'success': success,
                 'failed': failed,
+                'cancelled': cancelled,
                 'dry_run': self.dry_run,
                 'results': self.results,
             }, handle, ensure_ascii=False, indent=2)
@@ -301,6 +374,13 @@ class FollowupBatch:
 
     def _fill_direct(self, page, shop, index):
         """并发 Worker：直接在详情 URL 上填表发布，不经过列表点击。"""
+        self._check()
+        if self.runtime is not None:
+            self.debug('店铺进度 %d/%d：%s（ID=%s）' % (
+                index, self.total_targets,
+                shop.get('shop_name') or '-',
+                shop.get('kdt_id') or shop.get('shop_id') or '-',
+            ))
         detail_url = shop.get('detail_url') or ''
         result = {}
         success = False
@@ -313,10 +393,18 @@ class FollowupBatch:
                 shop_id=str(shop.get('kdt_id') or shop.get('shop_id') or ''),
                 detail_url=detail_url,
                 run_id='%s_%02d' % (self.run_id, index),
+                runtime=self.runtime,
+                publish_lock=self.publish_lock,
             )
             result = case.run()
             success = bool(result.get('success'))
             error = result.get('error', '')
+        except TaskCancelled:
+            self._record_result(
+                shop, detail_url, False, '已终止',
+                result.get('steps', []), cancelled=True,
+            )
+            raise
         except Exception as exc:
             error = repr(exc)
         self._record_result(
@@ -325,38 +413,91 @@ class FollowupBatch:
         return success
 
     def _worker(self, chunk):
-        bot = YouzanBot(lambda message: None)
+        """池线程：独占一个浏览器，顺序处理分配到的店铺，停止时立刻退出。"""
+        runtime = self.runtime
+        started = time.perf_counter()
+        first_name = (chunk[0][1].get('shop_name') if chunk else '') or '店铺'
+        label = '批次[%s…共%d家]' % (str(first_name)[:18], len(chunk))
+        status = '成功'
+        if runtime is not None:
+            runtime.begin_task(label, emit=False)
+        bot = None
         try:
+            self._pace()   # 错峰启动浏览器，削掉并发启动的 CPU 尖峰
+            bot = YouzanBot(self.debug)
+            bot.bind_runtime(runtime)
+            bot.stop_event = self.stop_event
             bot._ensure_browser(storage_state=config.AUTH_FILE)
             for index, shop in chunk:
-                if self.stop_event.is_set():
-                    break
-                ok = self._fill_direct(bot.page, shop, index)
+                self._check()
+                # @decision DEC-2 每个店铺用独立页面，不复用 bot.page。
+                # 原因：ShopFollowupCase.run() 每次都会 page.on('response') 注册监听器，
+                # Playwright 无法单独移除；复用同一页面时监听器随店铺数线性叠加，
+                # 每个响应被重复解析 N 次（本次日志出现 1,1,2,2…15,15 共 240 条重复）。
+                page = bot.context.new_page()
+                try:
+                    ok = self._fill_direct(page, shop, index)
+                finally:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
                 if not ok:
-                    self.stop_event.set()
-                    break
+                    # 单店失败不再中断整批，继续处理后面店铺，最后按数量汇总
+                    status = '失败'
+                    self.debug('第 %d 家未成功，继续下一家' % index)
+                self._pace()
+        except TaskCancelled:
+            status = '已终止'
+            self.debug('并发 Worker 已终止')
+            if runtime is not None:
+                runtime.emit(
+                    '已被终止，中断于步骤:逐店铺填写跟进记录', 'warning'
+                )
         except Exception as exc:
+            status = '失败'
             self.debug('并发 Worker 异常：%r' % exc)
-            self.stop_event.set()
+            self.abort_event.set()
         finally:
             try:
-                bot.close()
+                if bot is not None:
+                    bot.close()
             except Exception:
                 pass
+            if runtime is not None:
+                runtime.end_task(label, status, started, emit=True)
 
     def _run_parallel(self, targets, workers):
+        """把店铺切片提交到受控线程池，池容量严格等于下拉框选定的并发数。"""
         workers = max(1, min(workers, len(targets)))
         self.debug('并发填写：%d 家，%d 线程' % (len(targets), workers))
         indexed = list(enumerate(targets, 1))
-        chunks = [indexed[i::workers] for i in range(workers)]
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(self._worker, chunk) for chunk in chunks]
-            for future in futures:
-                try:
-                    future.result()
-                except Exception as exc:
-                    self.debug('并发任务异常：%r' % exc)
-                    self.stop_event.set()
+        chunks = [indexed[offset::workers] for offset in range(workers)]
+        own_pool = None
+        pool = self.executor
+        if pool is None:
+            from concurrent.futures import ThreadPoolExecutor
+            own_pool = ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix='YouzanBatch'
+            )
+            pool = own_pool
+        tasks: list[Future] = [pool.submit(self._worker, chunk) for chunk in chunks]
+        try:
+            # 阻塞等待而非轮询；工作线程靠停止事件在检查点自行退出
+            wait_futures(tasks)
+        finally:
+            if own_pool is not None:
+                own_pool.shutdown(wait=False, cancel_futures=True)
+        for task in tasks:
+            if task.cancelled():
+                continue
+            try:
+                task.result()
+            except TaskCancelled:
+                continue
+            except Exception as exc:
+                self.debug('并发任务异常：%r' % exc)
+                self.abort_event.set()
 
     def run(
         self,
@@ -368,7 +509,11 @@ class FollowupBatch:
         shops=None,
         announce_count=True,
         done_ids=None,
+        executor=None,
     ):
+        if executor is not None:
+            self.executor = executor
+        self.abort_event.clear()
         if shops is None:
             shops = self.load_all_shops() if all_shops else self.load_first_page()
         if announce_count:
@@ -393,22 +538,32 @@ class FollowupBatch:
             ))
         if not targets:
             self.debug('没有可填写的店铺')
-            self.raw('填写 0 条记录已完成，填写成功 0 条，失败 0 条。')
-            return {'attempted': 0, 'success': 0, 'failed': 0}
+            self.raw('填写 0 条记录已完成，填写成功 0 条，失败 0 条，终止 0 条。')
+            return {
+                'attempted': 0, 'success': 0, 'failed': 0, 'cancelled': 0,
+            }
 
-        self.stop_event.clear()
-        if workers > 1:
+        self.total_targets = len(targets)
+        if workers > 1 and len(targets) > 1:
             self._run_parallel(targets, workers)
         else:
-            for index, shop in enumerate(targets, 1):
-                self.debug('开始填写第 %d/%d 家：%s' % (
-                    index, len(targets), shop.get('shop_name')
+            for position, shop in enumerate(targets, 1):
+                self._check()
+                self._note('店铺进度 %d/%d：%s（ID=%s）' % (
+                    position, len(targets),
+                    shop.get('shop_name') or '-',
+                    shop.get('kdt_id') or shop.get('shop_id') or '-',
                 ))
-                ok = self._fill_one(shop, index)
+                ok = self._fill_one(shop, position)
                 if not ok:
-                    self.debug('第 %d 家失败，停止后续店铺' % index)
-                    break
+                    self.debug('第 %d 家未成功，继续下一家' % position)
+                self._pace()
 
-        attempted, success, failed = self._summary()
-        self._save_report(attempted, success, failed)
-        return {'attempted': attempted, 'success': success, 'failed': failed}
+        attempted, success, failed, cancelled = self._summary()
+        self._save_report(attempted, success, failed, cancelled)
+        return {
+            'attempted': attempted,
+            'success': success,
+            'failed': failed,
+            'cancelled': cancelled,
+        }

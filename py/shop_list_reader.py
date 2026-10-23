@@ -12,6 +12,7 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 import config
+from task_runtime import TaskCancelled
 
 SHOP_LIST_URL = 'https://qudao.youzan.com/index#/shop/list/my'
 SHOP_DETAIL_URL = 'https://qudao.youzan.com/#/shop/detail/%s'
@@ -19,15 +20,32 @@ SEPARATOR = '-' * 46
 
 
 class ShopListReader:
-    def __init__(self, bot, log, debug=None):
+    def __init__(self, bot, log, debug=None, runtime=None):
         self.bot = bot
         self.page = bot.page
         self.log = log
         self.debug = debug or (lambda message: None)
+        self.runtime = runtime
+        self.stop_event = runtime.stop_event if runtime is not None else None
         self.run_id = time.strftime('%Y%m%d_%H%M%S')
         self.api_pages = {}
         self.shops = []
         self.total_text = ''
+
+    def _check(self):
+        """停止检查点：每个分页/店铺循环开头调用。"""
+        if self.stop_event is not None and self.stop_event.is_set():
+            raise TaskCancelled()
+
+    def _sleep(self, seconds):
+        """可中断等待，替代 page.wait_for_timeout 的固定阻塞。"""
+        self._check()
+        seconds = max(0.0, float(seconds))
+        if self.stop_event is None:
+            time.sleep(seconds)
+            return
+        if self.stop_event.wait(seconds):
+            raise TaskCancelled()
 
     # ---------- 接口响应 ----------
     def _attach(self):
@@ -65,24 +83,28 @@ class ShopListReader:
     def _wait_rows(self, timeout=20):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            self._check()
             try:
                 if self._has_real_rows():
                     return self.page.locator('.fun-table tbody tr').count()
+            except TaskCancelled:
+                raise
             except Exception:
                 pass
-            self.page.wait_for_timeout(500)
+            self._sleep(0.5)
         return 0
 
     def _wait_data(self, page_no, timeout=25):
         """等待列表接口或真实店铺行出现，避免读到骨架行。"""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            self._check()
             if self.api_pages.get(page_no):
                 self._wait_rows(timeout=3)
                 return True
             if self._has_real_rows():
                 return True
-            self.page.wait_for_timeout(500)
+            self._sleep(0.5)
         return False
 
     def _parse_dom_rows(self):
@@ -193,7 +215,7 @@ class ShopListReader:
             try:
                 if pager.inner_text().strip() == str(page_no):
                     pager.evaluate("el => el.click()")
-                    self.page.wait_for_timeout(1500)
+                    self._sleep(1.5)
                     self._wait_rows()
                     return True
             except Exception:
@@ -236,9 +258,10 @@ class ShopListReader:
             except Exception:
                 pass
             for _ in range(20):
+                self._check()
                 if '/shop/detail/' in new_page.url:
                     break
-                new_page.wait_for_timeout(250)
+                self._sleep(0.25)
             if '/shop/detail/' in new_page.url:
                 self.debug('详情新标签 URL=%s' % new_page.url)
                 return new_page.url, new_page
@@ -275,7 +298,7 @@ class ShopListReader:
                 self.page.go_back(wait_until='domcontentloaded')
             except Exception:
                 pass
-            self.page.wait_for_timeout(1200)
+            self._sleep(1.2)
             self._wait_rows()
             self._restore_page(page_no)
 
@@ -315,16 +338,19 @@ class ShopListReader:
                 button.click(force=True)
             except Exception:
                 return False
-        self.page.wait_for_timeout(1800)
+        self._sleep(1.8)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
+            self._check()
             try:
                 current = self.page.locator('.fun-table tbody tr').first.inner_text()
+            except TaskCancelled:
+                raise
             except Exception:
                 current = ''
             if current and current != first_row:
                 return True
-            self.page.wait_for_timeout(500)
+            self._sleep(0.5)
         return False
 
     # ---------- 保存 ----------
@@ -378,10 +404,15 @@ class ShopListReader:
 
     # ---------- 主流程 ----------
     def run(self):
+        self._check()
         self._attach()
         self.debug('打开店铺列表：%s' % SHOP_LIST_URL)
-        self.page.goto(SHOP_LIST_URL, wait_until='domcontentloaded')
-        self.page.wait_for_timeout(1500)
+        self.page.goto(
+            SHOP_LIST_URL,
+            wait_until='domcontentloaded',
+            timeout=config.NAV_TIMEOUT_MS,
+        )
+        self._sleep(1.5)
         if not self._wait_data(1):
             self.debug('店铺列表未加载出真实数据（接口/表格均为空）')
             self._save()
@@ -396,6 +427,7 @@ class ShopListReader:
 
         page_no = 1
         while page_no <= 100:
+            self._check()
             page_numbers = self._page_numbers()
             max_page = max(page_numbers) if page_numbers else page_no
             self.debug('读取第 %d/%d 页...' % (page_no, max_page))
@@ -407,7 +439,11 @@ class ShopListReader:
                 self.debug('第 %d 页没有有效店铺数据' % page_no)
                 break
             for shop in shops:
-                shop['detail_url'] = self._fetch_detail_url(shop, page_no)
+                self._check()
+                # 接口已带 alias 时 detail_url 可直接拼出，无需逐店点「详情」开弹窗
+                # （每次约 2.4 秒，30 家约 72 秒）；仅在缺 URL 时才回退点击解析。
+                if config.SHOP_DETAIL_RESOLVE_BY_CLICK or not shop.get('detail_url'):
+                    shop['detail_url'] = self._fetch_detail_url(shop, page_no)
                 is_first = not self.shops
                 self.shops.append(shop)
                 block = self._shop_block_lines(shop)

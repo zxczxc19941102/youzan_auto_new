@@ -15,7 +15,10 @@ import re
 import time
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
 import config
+from task_runtime import TaskCancelled
 
 SHOP_ID = '2tUkp1ko7b6G19m5AZFF9fwjh'
 SHOP_LIST_URL = 'https://qudao.youzan.com/#/shop/list/my'
@@ -196,10 +199,19 @@ class ApiRecorder:
 class ShopFollowupCase:
     """指定店铺的跟进记录发布测试用例。"""
 
-    def __init__(self, bot, log, dry_run=False, shop_id=None, detail_url=None, run_id=None):
+    def __init__(
+        self, bot, log, dry_run=False, shop_id=None, detail_url=None,
+        run_id=None, runtime=None, publish_lock=None,
+    ):
         self.bot = bot
         self.page = bot.page
         self.log = log
+        self.runtime = runtime
+        self.publish_lock = publish_lock
+        self.stop_event = (
+            runtime.stop_event if runtime is not None
+            else getattr(bot, 'stop_event', None)
+        )
         self.dry_run = dry_run
         self.shop_id = shop_id or SHOP_ID
         self.detail_url = detail_url or SHOP_DETAIL_URL
@@ -215,6 +227,7 @@ class ShopFollowupCase:
         self.list_dump_path = ''
         self.form_values = {}
         self.publish_response = None
+        self._publish_before = 0     # 发布前的接口记录游标，用于事后补取响应
         self.viewport = 1600
         self.detail_dump_path = ''
         self.api_path = ''
@@ -226,28 +239,89 @@ class ShopFollowupCase:
         }
 
     # ---------- 执行框架 ----------
+    def _check(self):
+        """停止检查点：店铺循环、重试前、长等待前统一调用。"""
+        if self.stop_event is not None and self.stop_event.is_set():
+            raise TaskCancelled()
+
+    def _sleep(self, seconds):
+        """可中断等待，替代固定 wait_for_timeout，停止指令毫秒级生效。"""
+        self._check()
+        seconds = max(0.0, float(seconds))
+        if self.stop_event is None:
+            time.sleep(seconds)
+            return
+        if self.stop_event.wait(seconds):
+            raise TaskCancelled()
+
+    def _step_inputs(self, name):
+        if '详情' in name:
+            return '店铺ID=%s' % self.shop_id
+        if '表单' in name:
+            return '试运行=%s 店铺ID=%s' % (self.dry_run, self.shop_id)
+        if '发布' in name:
+            return '试运行=%s' % self.dry_run
+        return '店铺ID=%s' % self.shop_id
+
+    @staticmethod
+    def _step_result(detail):
+        if isinstance(detail, (str, int, float)):
+            return str(detail)[:160]
+        return '完成'
+
     def _step(self, name, func):
-        self.log('== %s ==' % name)
-        started = time.monotonic()
+        """统一步骤计时：开始、成功、失败、终止都落步骤记录与日志。"""
+        self._check()
+        started = time.perf_counter()
         try:
-            detail = func()
+            if self.runtime is not None:
+                with self.runtime.step(
+                    name,
+                    self._step_inputs(name),
+                    emit_start=False,
+                    emit_success=False,
+                ) as outcome:
+                    detail = func()
+                    outcome['value'] = self._step_result(detail)
+            else:
+                self.log('▶ 开始:%s，关键入参:%s' % (name, self._step_inputs(name)))
+                detail = func()
+        except TaskCancelled:
+            elapsed = time.perf_counter() - started
+            self.steps.append({
+                'name': name,
+                'status': 'CANCELLED',
+                'seconds': round(elapsed, 2),
+            })
+            self.log('%s 已终止，已执行 %.2f 秒' % (name, elapsed))
+            raise
         except Exception as exc:
+            elapsed = time.perf_counter() - started
             self.steps.append({
                 'name': name,
                 'status': 'FAILED',
-                'seconds': round(time.monotonic() - started, 2),
+                'seconds': round(elapsed, 2),
                 'error': repr(exc)[:500],
             })
             self.log('[STEP FAIL] %s: %r' % (name, exc))
-            self._capture('fail_' + re.sub(r'\W+', '_', name))
+            try:
+                self._capture('fail_' + re.sub(r'\W+', '_', name))
+            except TaskCancelled:
+                raise
+            except Exception:
+                pass
             raise
+        elapsed = time.perf_counter() - started
         self.steps.append({
             'name': name,
             'status': 'OK',
-            'seconds': round(time.monotonic() - started, 2),
+            'seconds': round(elapsed, 2),
             'detail': detail if isinstance(detail, (str, int, float)) else '',
         })
-        self.log('[STEP OK] %s (%.1fs)' % (name, time.monotonic() - started))
+        if self.runtime is None:
+            self.log('✔ 完成:%s，关键结果:%s，耗时 %.2f 秒' % (
+                name, self._step_result(detail), elapsed
+            ))
         return detail
 
     def run(self):
@@ -271,6 +345,9 @@ class ShopFollowupCase:
         return self.result
 
     def _capture(self, tag):
+        """截图/存档：默认只留失败现场；成功路径跳过，避免整页截图拖慢单店。"""
+        if not (config.SAVE_STEP_SCREENSHOTS or str(tag).startswith('fail_')):
+            return
         try:
             png = os.path.join(
                 config.PNG_DIR, 'followup_%s_%s.png' % (tag, self.run_id)
@@ -291,13 +368,20 @@ class ShopFollowupCase:
 
     # ---------- 步骤 1：列表 ----------
     def open_list(self):
-        self.page.goto(SHOP_LIST_URL, wait_until='domcontentloaded')
-        self.page.wait_for_timeout(2500)
+        self._check()
+        self.page.goto(
+            SHOP_LIST_URL,
+            wait_until='domcontentloaded',
+            timeout=config.NAV_TIMEOUT_MS,
+        )
+        self._sleep(2.5)
         try:
             self.page.wait_for_function(
                 "() => /我的店铺|店铺名称|店铺ID/.test(document.body.innerText)",
-                timeout=15000,
+                timeout=config.ASSERT_TIMEOUT_MS,
             )
+        except TaskCancelled:
+            raise
         except Exception:
             pass
         self._capture('shop_list')
@@ -356,24 +440,36 @@ class ShopFollowupCase:
 
     # ---------- 步骤 2：详情 ----------
     def open_detail(self):
+        self._check()
         self.log('直接打开店铺详情 URL=%s' % self.detail_url)
+        # 详情是 hash 路由 SPA：commit 即返回，改等页面内容出现，避免白等 45 秒
         try:
             self.page.goto(
-                self.detail_url, wait_until='domcontentloaded', timeout=60000
+                self.detail_url, wait_until='commit',
+                timeout=config.DETAIL_NAV_TIMEOUT_MS,
             )
+        except TaskCancelled:
+            raise
         except Exception as exc:
-            self.log('打开详情超时，重试一次：%r' % exc)
+            self.log('打开详情失败，%.2f 秒后重试一次：%r' % (
+                config.RETRY_BASE_DELAY, exc
+            ))
+            self._sleep(config.RETRY_BASE_DELAY)
             self.page.goto(
-                self.detail_url, wait_until='domcontentloaded', timeout=60000
+                self.detail_url, wait_until='commit',
+                timeout=config.DETAIL_NAV_TIMEOUT_MS,
             )
-        self.page.wait_for_timeout(3000)
+        # 固定等 3 秒改为「内容就绪即走」：多数店铺 1 秒内完成渲染
+        self._sleep(0.5)
         try:
             self.page.wait_for_function(
                 "() => /跟进记录|基本信息|店铺名称/.test(document.body.innerText)",
-                timeout=15000,
+                timeout=config.ASSERT_TIMEOUT_MS,
             )
+        except TaskCancelled:
+            raise
         except Exception:
-            pass
+            self._sleep(0.8)
         self._capture('shop_detail')
         self.log('店铺详情 URL=%s' % self.page.url)
         return self.page.url
@@ -493,7 +589,7 @@ class ShopFollowupCase:
         for _ in range(20):
             if toggle.count():
                 break
-            self.page.wait_for_timeout(500)
+            self._sleep(0.25)
         if not toggle.count():
             toggle = self.page.locator('[class*="SidePanel_toggle"]').first
         if toggle.count():
@@ -502,7 +598,7 @@ class ShopFollowupCase:
             if 'hide' in classes.lower():
                 toggle.evaluate("el => el.click()")
                 self.log('已点击「拜访商家」，展开右侧表单')
-                self.page.wait_for_timeout(1200)
+                self._sleep(0.6)
             else:
                 self.log('「拜访商家」面板已展开，无需重复点击')
         else:
@@ -517,13 +613,13 @@ class ShopFollowupCase:
                 if box:
                     self.log('表单位置 x=%d y=%d' % (box['x'], box['y']))
                     break
-            self.page.wait_for_timeout(500)
+            self._sleep(0.25)
 
         if not self._has_followup_form():
             tab = self.page.locator('.fun-tab-bar-tab').filter(has_text='跟进记录')
             if tab.count():
                 tab.first.evaluate("el => el.click()")
-                self.page.wait_for_timeout(1500)
+                self._sleep(0.8)
         if not self._has_followup_form():
             raise RuntimeError('未找到跟进记录表单（.fun-form-item）')
         self._capture('followup_form')
@@ -557,7 +653,7 @@ class ShopFollowupCase:
             target.evaluate("el => el.click()")
         except Exception:
             target.click(force=True)
-        self.page.wait_for_timeout(300)
+        self._sleep(0.15)
         value = item.evaluate("""item => {
             const checked = item.querySelector('input[type="radio"]:checked');
             if (!checked) return '';
@@ -580,7 +676,7 @@ class ShopFollowupCase:
             )
             if buttons.count() and buttons.first.is_visible():
                 buttons.first.click()
-                self.page.wait_for_timeout(250)
+                self._sleep(0.15)
                 self.log('已点击下拉/日期面板的「确定」')
                 return True
         return False
@@ -594,7 +690,7 @@ class ShopFollowupCase:
             select.evaluate("el => el.click()")
         except Exception:
             select.click(force=True)
-        self.page.wait_for_timeout(500)
+        self._sleep(0.3)
 
         option = None
         selectors = (
@@ -618,14 +714,14 @@ class ShopFollowupCase:
                 option = self.page.get_by_text(option_text, exact=True).last
                 if option.count():
                     break
-            self.page.wait_for_timeout(200)
+            self._sleep(0.12)
         if option is None or not option.count():
             raise RuntimeError('%s 未找到下拉选项：%s' % (label, option_text or '第一个'))
         try:
             option.evaluate("el => el.click()")
         except Exception:
             option.click(force=True)
-        self.page.wait_for_timeout(300)
+        self._sleep(0.15)
         self._confirm_dropdown()
 
         value = item.evaluate("""item => {
@@ -654,7 +750,7 @@ class ShopFollowupCase:
             el.dispatchEvent(new Event('input', {bubbles: true}));
             el.dispatchEvent(new Event('change', {bubbles: true}));
         }""", text)
-        self.page.wait_for_timeout(200)
+        self._sleep(0.1)
         value = textarea.input_value().strip()
         if value != text:
             raise RuntimeError('%s 写入失败：%s' % (label, value))
@@ -678,7 +774,7 @@ class ShopFollowupCase:
             date_value = date_input.input_value().strip()
             if date_value:
                 break
-            self.page.wait_for_timeout(250)
+            self._sleep(0.15)
         if not date_value:
             raise RuntimeError('跟进日期为空，页面可能未加载完成')
         self.form_values['跟进日期'] = date_value
@@ -713,6 +809,7 @@ class ShopFollowupCase:
         return None
 
     def _response_ok(self, record):
+        """发布是否成功：兼容 code/success/msg/visitRecordId 多种成功标识。"""
         if not record or record.get('status') != 200:
             return False
         if record.get('resp_success') is True:
@@ -722,16 +819,48 @@ class ShopFollowupCase:
         body = record.get('response') or ''
         try:
             payload = json.loads(body)
-            if isinstance(payload, dict):
-                if payload.get('success') is True:
-                    return True
-                if str(payload.get('code')) in ('0', '200', '20000'):
-                    return True
         except Exception:
-            pass
-        return False
+            return False
+        if not isinstance(payload, dict):
+            return False
+        if payload.get('success') is True:
+            return True
+        if str(payload.get('code')) in ('0', '200', '20000'):
+            return True
+        data = payload.get('data')
+        if isinstance(data, dict) and data.get('visitRecordId'):
+            return True
+        return '操作成功' in str(payload.get('msg') or '')
+
+    def _log_publish_detail(self, record):
+        """输出发布接口的业务明细：记录ID、风控提示（不影响成功判定）。"""
+        body = (record or {}).get('response') or ''
+        try:
+            payload = json.loads(body)
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        data = payload.get('data')
+        if isinstance(data, dict) and data.get('visitRecordId'):
+            self.log('拜访记录已生成：visitRecordId=%s' % data['visitRecordId'])
+        warnings = data.get('visitReturnCodes') if isinstance(data, dict) else None
+        for item in warnings or []:
+            if not isinstance(item, dict):
+                continue
+            message = str(item.get('message') or '')
+            if str(item.get('code')) == '4' or '太快' in message:
+                self.log('接口提示：%s（记录已写入，建议降低并发或加长间隔）' % message)
 
     def publish(self):
+        if self.publish_lock is None:
+            return self._publish_unlocked()
+        self.log('waiting for same-account publish lock')
+        with self.publish_lock:
+            self.log('acquired same-account publish lock')
+            return self._publish_unlocked()
+
+    def _publish_unlocked(self):
         button = self._visible_button('发布')
         if button is None:
             fallback = self.page.locator('button').filter(has_text='发布')
@@ -745,57 +874,185 @@ class ShopFollowupCase:
         if button is None:
             raise RuntimeError('未找到可见的「发布」按钮')
 
-        before = len(self.recorder.records)
+        self._publish_before = len(self.recorder.records)
+        started = time.perf_counter()
+        # @decision DEC-1 用 expect_response 事件驱动等待，替代固定 sleep 轮询。
+        # 原因：Playwright 同步 API 的事件循环只在 Playwright 调用期间运行（greenlet 调度），
+        # 纯 Event.wait 等待期间 page.on('response') 不会触发，响应永远采集不到。
+        # 依据：tests/test_publish_wait.py 与 playwright/_impl/_sync_base.py:wait_for_future。
         try:
-            button.evaluate("el => el.click()")
-        except Exception:
-            button.click(force=True)
-        # 发布后若再弹“确定”确认框，自动点掉；没有则直接等待接口
-        self.page.wait_for_timeout(800)
-        confirm = self._visible_button('确定')
-        if confirm is not None:
-            try:
-                confirm.evaluate("el => el.click()")
-            except Exception:
-                confirm.click(force=True)
-            self.log('已点击发布确认「确定」')
-            self.page.wait_for_timeout(500)
-        self.page.wait_for_timeout(4000)
-        new_records = self.recorder.records[before:]
-        posts = [
-            item for item in new_records
-            if item['method'] in ('POST', 'PUT') and item.get('status')
-        ]
-        if not posts:
-            posts = [
-                item for item in self.recorder.records
-                if item['method'] in ('POST', 'PUT') and item.get('status')
-                and any(word in item['path'].lower() for word in (
-                    'follow', 'record', 'visit', 'save', 'add', 'publish'
+            with self.page.expect_response(
+                self._is_publish_response,
+                timeout=config.PUBLISH_TIMEOUT_MS,
+            ) as info:
+                try:
+                    button.evaluate("el => el.click()")
+                except Exception:
+                    button.click(force=True)
+                # 发布后若再弹“确定”确认框，自动点掉；没有则直接等待接口
+                self._sleep(0.4)
+                confirm = self._visible_button('确定')
+                if confirm is not None:
+                    try:
+                        confirm.evaluate("el => el.click()")
+                    except Exception:
+                        confirm.click(force=True)
+                    self.log('已点击发布确认「确定」')
+                    self._sleep(0.3)
+            self.publish_response = self._record_from_response(info.value)
+            self.log('发布接口响应耗时 %.2f 秒' % (time.perf_counter() - started))
+        except PlaywrightTimeoutError:
+            # 超时后事件已由 expect_response 驱动过一轮，先看看是否只是晚到
+            self.publish_response = self._latest_publish_record(self._publish_before)
+            if self.publish_response is None:
+                self.publish_response = self._wait_for_publish_record(
+                    config.PUBLISH_RESPONSE_GRACE_MS
+                )
+            if self.publish_response is None:
+                self.log('等待发布接口响应超时（%.1f 秒），期间未收到 /visit/save 响应' % (
+                    config.PUBLISH_TIMEOUT_MS / 1000.0
                 ))
-            ]
-        self.publish_response = posts[-1] if posts else None
+            else:
+                self.log('发布接口响应晚于预期，已从事件记录中补获')
         self._capture('after_publish')
         if self.publish_response:
-            self.log('发布接口：%s %s HTTP=%s' % (
+            self.log('发布接口：%s %s HTTP=%s code=%s' % (
                 self.publish_response['method'],
                 self.publish_response['path'],
                 self.publish_response['status'],
+                self.publish_response.get('resp_code', '-'),
             ))
+            self._log_publish_detail(self.publish_response)
         else:
-            self.log('未捕获到发布接口响应')
+            self.log('未捕获到发布接口响应（页面可能未提交或网络超时）')
         return 'publish clicked'
 
+    def _wait_for_publish_record(self, timeout_ms):
+        """Pump Playwright events for an already-submitted publish request."""
+        deadline = time.monotonic() + max(0.0, timeout_ms / 1000.0)
+        while time.monotonic() < deadline:
+            self._check()
+            record = self._latest_publish_record(self._publish_before)
+            if record is not None:
+                return record
+            remaining = max(1, int((deadline - time.monotonic()) * 1000))
+            try:
+                self.page.wait_for_timeout(min(100, remaining))
+            except TaskCancelled:
+                raise
+            except Exception:
+                self._sleep(min(0.1, remaining / 1000.0))
+        return self._latest_publish_record(self._publish_before)
+
+    @staticmethod
+    def _is_publish_response(response):
+        """发布接口判定：POST/PUT 且路径命中 visit/save（兼容同类保存接口）。"""
+        try:
+            if response.request.method not in ('POST', 'PUT'):
+                return False
+            path = urlsplit(response.url).path.lower()
+            return '/visit/save' in path or ('visit' in path and 'save' in path)
+        except Exception:
+            return False
+
+    def _record_from_response(self, response):
+        """把 expect_response 拿到的响应转成与 ApiRecorder 相同结构的记录。"""
+        record = {
+            'method': response.request.method,
+            'path': '',
+            'url': '',
+            'post': '',
+            'status': None,
+            'response': '',
+        }
+        try:
+            url = response.url
+            record['url'] = _sanitize_url(url)
+            record['path'] = urlsplit(url).path
+            record['status'] = response.status
+        except Exception:
+            return record
+        try:
+            record['response'] = _sanitize_body(response.text()[:3000])
+        except Exception:
+            record['response'] = ''
+        try:
+            payload = json.loads(record['response'])
+            if isinstance(payload, dict):
+                if isinstance(payload.get('code'), (int, str)):
+                    record['resp_code'] = str(payload.get('code'))
+                if isinstance(payload.get('success'), bool):
+                    record['resp_success'] = payload.get('success')
+        except Exception:
+            pass
+        return record
+
+    def _latest_publish_record(self, start=0):
+        """从事件记录中补取最近的发布响应（用于迟到的响应）。"""
+        for item in reversed(self.recorder.records[start:]):
+            if item.get('method') not in ('POST', 'PUT') or not item.get('status'):
+                continue
+            path = (item.get('path') or '').lower()
+            if '/visit/save' in path or ('visit' in path and 'save' in path):
+                return item
+        return None
+
+    @staticmethod
+    def _response_msg(record):
+        """提取接口返回的业务提示，失败时给出真实原因而不是“无响应”。"""
+        try:
+            payload = json.loads((record or {}).get('response') or '')
+            message = payload.get('msg') or payload.get('message') or ''
+            return str(message)[:120]
+        except Exception:
+            return ''
+
     def verify(self):
-        body_text = self.page.inner_text('body')[:3000]
-        text_ok = any(word in body_text for word in (
-            '发布成功', '保存成功', '提交成功', '跟进记录发布成功'
-        ))
+        """页面提示或发布接口任一确认成功；最多轮询 8 秒，避免 toast 闪退误判。"""
+        # 发布等待超时时，先做一次最小 Playwright 调用把积压事件派发出来，
+        # 再从事件记录里补取真实响应，避免把已经写入成功的记录误判为失败。
+        if self.publish_response is None:
+            self.publish_response = self._wait_for_publish_record(
+                config.PUBLISH_RESPONSE_GRACE_MS
+            )
         api_ok = self._response_ok(self.publish_response)
+        text_ok = False
+        deadline = time.monotonic() + 8
+        while True:
+            self._check()
+            if not api_ok:
+                # inner_text 会驱动事件循环；下一轮再补取，可捕获迟到的响应
+                self.publish_response = (
+                    self.publish_response
+                    or self._latest_publish_record(self._publish_before)
+                )
+                api_ok = self._response_ok(self.publish_response)
+            try:
+                body_text = self.page.inner_text('body')[:3000]
+            except TaskCancelled:
+                raise
+            except Exception:
+                body_text = ''
+            text_ok = any(word in body_text for word in (
+                '发布成功', '保存成功', '提交成功', '跟进记录发布成功'
+            ))
+            if text_ok or api_ok or time.monotonic() >= deadline:
+                break
+            self._sleep(0.25)
         if not (text_ok or api_ok):
-            raise RuntimeError('未检测到发布成功信号（页面/接口均未确认）')
+            if self.publish_response:
+                reason = '接口 %s %s HTTP=%s code=%s msg=%s，页面无成功提示' % (
+                    self.publish_response['method'],
+                    self.publish_response['path'],
+                    self.publish_response['status'],
+                    self.publish_response.get('resp_code', '-'),
+                    self._response_msg(self.publish_response) or '-',
+                )
+            else:
+                reason = '未捕获到发布接口响应，页面无成功提示'
+            raise RuntimeError('未检测到发布成功信号：' + reason)
         self.result['publish_success'] = True
-        self.log('发布成功：%s' % ('页面提示' if text_ok else '接口返回成功'))
+        self.log('发布成功：%s' % ('接口返回成功' if api_ok else '页面提示'))
         return 'text=%s api=%s' % (text_ok, api_ok)
 
     # ---------- 报告 ----------

@@ -9,16 +9,12 @@ youzan_auto/
 ├─ main.py              入口主程序（GUI + --smoke 冒烟）—— 固定在根目录，不归档
 ├─ requirements.txt     依赖清单
 ├─ README.md
-├─ py/                  所有 .py 源码（核心模块 + 调试脚本）
+├─ py/                  核心 Python 模块
 │  ├─ config.py         配置（URL / 路径 / 账号 / 浏览器）
 │  ├─ captcha.py        滑块：缺口检测 loc_gap + 模拟真人拖动 human_drag
 │  ├─ youzan_bot.py     YouzanBot：登录→滑块→短信→抓CK/页面源码/复用
 │  ├─ shop_followup.py  指定店铺跟进记录自动化测试用例（列表→详情→接口→表单→发布）
-│  ├─ dump_full_form.py 调试脚本（表单结构抓取）
-│  ├─ inspect_detail.py 调试脚本（店铺详情页结构）
-│  ├─ inspect_form.py   调试脚本（跟进表单结构）
-│  ├─ login_dump.py     调试脚本（登录+表单流程）
-│  └─ run_form.py       调试脚本（自动填跟进表单）
+│  └─ task_runtime.py   GUI/任务运行时、线程池与日志运行时支持
 ├─ json/                登录凭据（自动生成，敏感，勿外传）
 │  ├─ cookies.json      Cookie/CK
 │  └─ auth_state.json   Cookie + localStorage TOKEN（优先使用）
@@ -41,6 +37,14 @@ python main.py --smoke    # 无 GUI 冒烟，验证能跑到短信阶段
 
 # 也可显式指定 venv 解释器：
 .\venv\Scripts\python.exe main.py
+```
+
+账号密码通过环境变量提供，不写入源码：
+
+```powershell
+$env:YOUZAN_USER = '你的账号'
+$env:YOUZAN_PASSWORD = '你的密码'
+python main.py
 ```
 
 ## 使用流程
@@ -75,15 +79,15 @@ python main.py --fill-first3       # 真实填写并发布前3条
 - 最后输出：`填写 X 条记录已完成，填写成功 X 条，失败 X 条。`
 - 批量结果保存到 `txt/followup_batch_*.html` 和 `.json`。
 
-## 全量跟进（支持 1/2/5/8/10/15/20 线程）
+## 全量跟进（支持 1~10 线程，默认 3）
 
 GUI：
-- 勾选「登录后全量填写跟进记录」。
-- 「全量跟进试运行（只填表不发布）」默认勾选；确认无误后取消勾选才会真实发布。
-- 「并发线程」下拉选择 `1/2/5/8/10/15/20`。
+- 勾选「登录后统计店铺并填写全部跟进记录」。
+- 「全量跟进试运行（只填表不发布）」默认不勾选；勾选后只填表不发布。
+- 「并发线程」下拉选择 `1~10`，默认 `3`（低并发更稳，可减少「操作太快」风控提示）。
 - 登录成功后按选择线程执行；每个线程使用独立 Playwright/Edge，共享已登录的 `auth_state.json`。
-- 任一店铺失败立即停止后续调度，已开始的线程会跑完当前店铺。
-- 控制台只输出每一步成功/失败和店铺块，不输出接口/页面调试信息。
+- 单店失败不中断整批，记录失败后继续下一家，最后汇总成功/失败/终止数量。
+- 运行日志实时写入 `LOG/run_*.txt`，其中包含每个步骤的开始/结束明细与耗时。
 - 结果同步保存到 `txt/followup_batch_*.txt/.json/.html`。
 
 CLI：

@@ -8,6 +8,9 @@
 import io
 import time
 import random
+import threading
+from concurrent.futures import ProcessPoolExecutor
+
 import numpy as np
 from PIL import Image
 
@@ -47,12 +50,12 @@ def loc_gap(bg_bytes, sl_bytes):
     bga = np.asarray(bg, dtype=np.float32)
     W, H = bg.size
 
-    # Sobel 梯度幅值
+    # Sobel 梯度幅值（float32 减半内存带宽，避免多线程下抢 CPU/内存）
     gray = 0.299 * bga[:, :, 0] + 0.587 * bga[:, :, 1] + 0.114 * bga[:, :, 2]
     sx = gray[1:-1, 2:] - gray[1:-1, :-2]
     sy = gray[2:, 1:-1] - gray[:-2, 1:-1]
     E = np.sqrt(sx ** 2 + sy ** 2)
-    Efull = np.zeros((H, W), dtype=np.float64)
+    Efull = np.zeros((H, W), dtype=np.float32)
     Efull[1:-1, 1:-1] = E
 
     # 拼图 alpha 剪影 -> 轮廓点（只取边界，形状敏感）
@@ -64,15 +67,15 @@ def loc_gap(bg_bytes, sl_bytes):
         for xx in range(1, sw - 1):
             if mask[yy, xx] and not (mask[yy, xx - 1] and mask[yy, xx + 1] and mask[yy - 1, xx] and mask[yy + 1, xx]):
                 contour.append((xx, yy))
-    if len(contour) > 400:
-        contour = contour[::len(contour) // 400]
+    if len(contour) > 200:
+        contour = contour[::len(contour) // 200]
 
     bh, bw = H - sh, W - sw
     if bh <= 0 or bw <= 0 or not contour:
         return 0, 0, 0.0
 
     # 向量化：对每个轮廓偏移累加梯度图，等价于轮廓对齐边缘的强度
-    score = np.zeros((bh, bw), dtype=np.float64)
+    score = np.zeros((bh, bw), dtype=np.float32)
     for dx, dy in contour:
         score += Efull[dy:dy + bh, dx:dx + bw]
     score /= len(contour)
@@ -80,6 +83,31 @@ def loc_gap(bg_bytes, sl_bytes):
     idx = int(np.argmax(score))
     yidx, xidx = np.unravel_index(idx, score.shape)
     return int(xidx), int(yidx), float(score[yidx, xidx])
+
+
+_POOL = {'executor': None, 'lock': threading.Lock(), 'broken': False}
+
+
+def _process_pool():
+    """懒加载单进程池：CPU 密集的缺口计算不占线程池工作线程。"""
+    with _POOL['lock']:
+        if _POOL['executor'] is None and not _POOL['broken']:
+            try:
+                _POOL['executor'] = ProcessPoolExecutor(max_workers=1)
+            except Exception:
+                _POOL['broken'] = True
+        return _POOL['executor']
+
+
+def loc_gap_offload(bg_bytes, sl_bytes, timeout=12.0):
+    """把缺口识别放独立进程执行；进程池不可用/超时时回退当前线程。"""
+    pool = _process_pool()
+    if pool is not None:
+        try:
+            return pool.submit(loc_gap, bg_bytes, sl_bytes).result(timeout=timeout)
+        except Exception:
+            _POOL['broken'] = True
+    return loc_gap(bg_bytes, sl_bytes)
 
 
 def human_drag(page, dist, cx, cy):
