@@ -86,8 +86,9 @@ def _unprotect_password(value):
     if not value:
         return ''
     if not str(value).startswith('dpapi:'):
-        # Compatibility with an older local_config.json created before DPAPI.
-        return str(value)
+        # Never treat legacy plaintext configuration as a usable credential.
+        # The GUI asks the user to re-enter it; the normal save path uses DPAPI.
+        return ''
     try:
         protected = base64.b64decode(str(value)[6:])
         raw = _dpapi_transform(protected, decrypt=True)
@@ -110,9 +111,16 @@ _LOCAL_CONFIG = _load_local_config()
 
 # Environment variables take precedence over the saved local settings.
 DEFAULT_USER = os.environ.get('YOUZAN_USER') or str(_LOCAL_CONFIG.get('username', ''))
-DEFAULT_PWD = os.environ.get('YOUZAN_PASSWORD') or _unprotect_password(
-    _LOCAL_CONFIG.get('password_protected', _LOCAL_CONFIG.get('password', ''))
+_LOCAL_PASSWORD_VALUE = _LOCAL_CONFIG.get(
+    'password_protected', _LOCAL_CONFIG.get('password', '')
 )
+_PASSWORD_FROM_ENV = os.environ.get('YOUZAN_PASSWORD')
+LOCAL_PASSWORD_MIGRATION_REQUIRED = bool(
+    not _PASSWORD_FROM_ENV
+    and _LOCAL_PASSWORD_VALUE
+    and not str(_LOCAL_PASSWORD_VALUE).startswith('dpapi:')
+)
+DEFAULT_PWD = _PASSWORD_FROM_ENV or _unprotect_password(_LOCAL_PASSWORD_VALUE)
 DEFAULT_AUTO_SHOP_LIST = _as_bool(_LOCAL_CONFIG.get('auto_shop_list'), True)
 DEFAULT_AUTO_FILL_ALL = _as_bool(_LOCAL_CONFIG.get('auto_fill_all'), True)
 DEFAULT_FILL_ALL_DRY = _as_bool(_LOCAL_CONFIG.get('fill_all_dry'), False)

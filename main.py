@@ -496,10 +496,11 @@ def _auto_followup_after_login(bot_obj, settings):
         )
 
     if already:
-        log('检测到今天已有跟进记录：%d家' % len(already))
-        if not _confirm_repeat_followup(len(already)):
-            log('已选择不重复填写，跳过跟进记录')
+        pending_count = max(0, len(shops) - len(already))
+        if pending_count == 0:
+            log('\u68c0\u6d4b\u5230\u4eca\u5929\u5df2\u6709\u8ddf\u8fdb\u8bb0\u5f55\uff1a%d\u5bb6\uff0c\u5f85\u5904\u74060\u5bb6\uff0c\u81ea\u52a8\u8df3\u8fc7\u91cd\u590d\u586b\u5199' % len(already))
             return {'success': True, 'count': len(shops), 'skipped': True}
+        log('\u68c0\u6d4b\u5230\u4eca\u5929\u5df2\u6709\u8ddf\u8fdb\u8bb0\u5f55\uff1a%d\u5bb6\uff0c\u672c\u6b21\u4ec5\u5904\u7406\u5f85\u5904\u7406 %d \u5bb6\u5e97\u94fa' % (len(already), pending_count))
     if stop_flag.is_set():
         log('已取消，跳过跟进内容填写')
         return {'success': False, 'count': len(shops), 'cancelled': True}
@@ -508,7 +509,7 @@ def _auto_followup_after_login(bot_obj, settings):
     workers = max(1, min(10, int(settings.get('workers', config.DEFAULT_WORKERS))))
     fill_debug = _make_debug_log('fill_all')
     fill_debug('全量跟进：workers=%d dry_run=%s skip_done=%s' % (
-        workers, dry_run, not bool(already)
+        workers, dry_run, True
     ))
     fill_batch = FollowupBatch(
         bot_obj, raw_log, styled_log, fill_debug,
@@ -529,7 +530,7 @@ def _auto_followup_after_login(bot_obj, settings):
         result = fill_batch.run(
             all_shops=True,
             workers=workers,
-            skip_done=not bool(already),
+            skip_done=True,
             shops=shops,
             announce_count=False,
             done_ids=today_ids,
@@ -861,6 +862,8 @@ def run_gui():
     root.after(LOG_FLUSH_MS, _drain_log_queue)
     root.after(200, _poll_run_state)
     log('日志文件：%s' % _ensure_log_file())
+    if config.LOCAL_PASSWORD_MIGRATION_REQUIRED:
+        log_error('\u672c\u5730\u65e7\u7248\u660e\u6587\u5bc6\u7801\u4e0d\u4f1a\u81ea\u52a8\u4f7f\u7528\uff1b\u8bf7\u91cd\u65b0\u8f93\u5165\u5bc6\u7801\uff0c\u767b\u5f55\u6210\u529f\u540e\u5c06\u4ee5 Windows DPAPI \u4fdd\u62a4\u4fdd\u5b58')
     root.mainloop()
     try:
         if _LOG_FILE['handle'] is not None:

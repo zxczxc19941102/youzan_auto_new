@@ -15,8 +15,18 @@ import config
 from task_runtime import TaskCancelled
 
 SHOP_LIST_URL = 'https://qudao.youzan.com/index#/shop/list/my'
-SHOP_DETAIL_URL = 'https://qudao.youzan.com/#/shop/detail/%s'
+SHOP_DETAIL_URL = 'https://qudao.youzan.com/index#/shop/detail/%s'
 SEPARATOR = '-' * 46
+
+
+def _canonical_detail_url(url):
+    """Use the SPA entry document for detail routes, not the root shell."""
+    value = str(url or '')
+    return value.replace(
+        'https://qudao.youzan.com/#/shop/detail/',
+        'https://qudao.youzan.com/index#/shop/detail/',
+        1,
+    )
 
 
 class ShopListReader:
@@ -215,7 +225,7 @@ class ShopListReader:
 
     def open_detail_popup(self, shop):
         """点击详情并返回 (url, popup_page)；popup_page 由调用方负责关闭。"""
-        fallback = shop.get('detail_url') or ''
+        fallback = _canonical_detail_url(shop.get('detail_url') or '')
         row = self._find_row(shop.get('shop_name', ''))
         if row is None:
             self.debug('未找到店铺行，使用接口拼接详情 URL：%s' % shop.get('shop_name'))
@@ -284,7 +294,7 @@ class ShopListReader:
             return detail_url
 
         if '/shop/detail/' in self.page.url:
-            detail_url = self.page.url
+            detail_url = _canonical_detail_url(self.page.url)
             try:
                 self.page.go_back(wait_until='domcontentloaded')
             except Exception:
@@ -295,7 +305,7 @@ class ShopListReader:
 
         if not detail_url:
             self.debug('未获取到详情 URL，使用拼接 URL：%s' % shop.get('shop_name'))
-            detail_url = (shop.get('detail_url') or '')
+            detail_url = _canonical_detail_url(shop.get('detail_url') or '')
         return detail_url
 
     def _page_numbers(self):

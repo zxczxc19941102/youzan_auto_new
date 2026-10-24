@@ -21,13 +21,23 @@ import config
 from task_runtime import TaskCancelled
 
 SHOP_ID = '2tUkp1ko7b6G19m5AZFF9fwjh'
-SHOP_LIST_URL = 'https://qudao.youzan.com/#/shop/list/my'
-SHOP_DETAIL_URL = 'https://qudao.youzan.com/#/shop/detail/%s' % SHOP_ID
+SHOP_LIST_URL = 'https://qudao.youzan.com/index#/shop/list/my'
+SHOP_DETAIL_URL = 'https://qudao.youzan.com/index#/shop/detail/%s' % SHOP_ID
 
 MASK_KEYWORDS = (
     'token', 'ticket', 'csrf', 'cookie', 'session',
     'mobile', 'phone', 'password',
 )
+
+
+def _canonical_detail_url(url):
+    """Use the SPA entry document for detail routes, not the root shell."""
+    value = str(url or '')
+    return value.replace(
+        'https://qudao.youzan.com/#/shop/detail/',
+        'https://qudao.youzan.com/index#/shop/detail/',
+        1,
+    )
 
 
 def _mask_value(key, value):
@@ -214,7 +224,7 @@ class ShopFollowupCase:
         )
         self.dry_run = dry_run
         self.shop_id = shop_id or SHOP_ID
-        self.detail_url = detail_url or SHOP_DETAIL_URL
+        self.detail_url = _canonical_detail_url(detail_url or SHOP_DETAIL_URL)
         self.run_id = run_id or time.strftime('%Y%m%d_%H%M%S')
         self.started_at = time.strftime('%Y-%m-%d %H:%M:%S')
         self.recorder = ApiRecorder(log)
