@@ -1,47 +1,107 @@
-﻿# 在 Windows PowerShell 中初始化本项目运行环境。
-# 用法：powershell -ExecutionPolicy Bypass -File .\setup.ps1
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [switch]$ForceReinstall
 )
 
 $ErrorActionPreference = 'Stop'
-$ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ProjectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $MyInvocation.MyCommand.Path)).TrimEnd('\', '/')
 Set-Location -LiteralPath $ProjectRoot
+$VenvRoot = Join-Path $ProjectRoot 'venv'
+$VenvPython = Join-Path $VenvRoot 'Scripts\python.exe'
+
+function Test-PythonExecutable {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [string[]]$Arguments = @()
+    )
+    try {
+        & $Executable @Arguments -c "import sys; assert sys.version_info >= (3, 10); print(sys.executable)" 2>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
 
 function Find-Python {
-    $candidates = @(
-        (Get-Command py -ErrorAction SilentlyContinue),
-        (Get-Command python -ErrorAction SilentlyContinue)
-    )
-    foreach ($candidate in $candidates) {
-        if ($candidate) { return $candidate.Source }
+    # 优先复用项目自身的 venv。项目移动后，venv 仍可能完全可用；此时不应要求系统
+    # 另外安装 Python，也不应误删可用环境。
+    if (Test-Path -LiteralPath $VenvPython -PathType Leaf) {
+        if (Test-PythonExecutable -Executable $VenvPython) {
+            return @{ Path = $VenvPython; Args = @(); IsVenv = $true }
+        }
+        Write-Warning "现有 venv 无法启动：$VenvPython"
     }
-    throw '未找到 Python。请先安装 Python 3.10 或更高版本，并勾选 Add Python to PATH。'
+
+    $launcher = Get-Command py -ErrorAction SilentlyContinue
+    if ($launcher -and (Test-PythonExecutable -Executable $launcher.Source -Arguments @('-3'))) {
+        return @{ Path = $launcher.Source; Args = @('-3'); IsVenv = $false }
+    }
+
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if ($python -and (Test-PythonExecutable -Executable $python.Source)) {
+        return @{ Path = $python.Source; Args = @(); IsVenv = $false }
+    }
+
+    throw '未找到可运行的 Python 3.10+。现有 venv 也不可用，请先安装 Python 并确保 py 或 python 可用。'
+}
+
+function Invoke-Checked {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$Operation
+    )
+    & $Executable @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Operation 失败，退出码：$LASTEXITCODE"
+    }
+}
+
+function Remove-BrokenVenv {
+    if (-not (Test-Path -LiteralPath $VenvRoot)) { return }
+
+    $rootFull = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/')
+    $venvFull = [System.IO.Path]::GetFullPath($VenvRoot).TrimEnd('\', '/')
+    $venvParent = [System.IO.Path]::GetDirectoryName($venvFull).TrimEnd('\', '/')
+    if (-not [string]::Equals($venvParent, $rootFull, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals([System.IO.Path]::GetFileName($venvFull), 'venv', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "拒绝删除非项目 venv 路径：$venvFull"
+    }
+
+    $item = Get-Item -LiteralPath $VenvRoot -Force
+    if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw "venv 是链接/重解析点，为避免删除链接目标而停止：$VenvRoot"
+    }
+    Write-Host '检测到损坏或迁移过的 venv，正在重建项目虚拟环境 ...' -ForegroundColor Yellow
+    Remove-Item -LiteralPath $VenvRoot -Recurse -Force
 }
 
 $Python = Find-Python
-$VenvPython = Join-Path $ProjectRoot 'venv\Scripts\python.exe'
+$venvIsValid = Test-PythonExecutable -Executable $VenvPython
 
-if (-not (Test-Path -LiteralPath $VenvPython)) {
+if (-not $venvIsValid) {
+    Remove-BrokenVenv
     Write-Host '正在创建项目虚拟环境 venv ...' -ForegroundColor Cyan
-    if ((Split-Path -Leaf $Python) -eq 'py.exe') {
-        & $Python -3 -m venv (Join-Path $ProjectRoot 'venv')
-    } else {
-        & $Python -m venv (Join-Path $ProjectRoot 'venv')
-    }
+    Invoke-Checked -Executable $Python.Path -Arguments ($Python.Args + @('-m', 'venv', $VenvRoot)) -Operation '创建虚拟环境'
 }
 
-Write-Host '正在升级 pip 并安装依赖 ...' -ForegroundColor Cyan
-& $VenvPython -m pip install --upgrade pip
+if (-not (Test-Path -LiteralPath $VenvPython)) {
+    throw "虚拟环境创建后仍找不到解释器：$VenvPython"
+}
+
+Write-Host '正在检查并安装依赖 ...' -ForegroundColor Cyan
+$requirements = Join-Path $ProjectRoot 'requirements.txt'
 if ($ForceReinstall) {
-    & $VenvPython -m pip install --upgrade --force-reinstall -r (Join-Path $ProjectRoot 'requirements.txt')
+    Invoke-Checked -Executable $VenvPython -Arguments @('-m', 'pip', 'install', '--disable-pip-version-check', '--upgrade', '--force-reinstall', '-r', $requirements) -Operation '安装项目依赖'
 } else {
-    & $VenvPython -m pip install --upgrade -r (Join-Path $ProjectRoot 'requirements.txt')
+    # 不强制升级已安装的包，避免仅做本地初始化时因网络/镜像不可用而长时间阻塞。
+    Invoke-Checked -Executable $VenvPython -Arguments @('-m', 'pip', 'install', '--disable-pip-version-check', '-r', $requirements) -Operation '安装项目依赖'
 }
 
 Write-Host '正在执行 Python 导入检查 ...' -ForegroundColor Cyan
-& $VenvPython -c "import sys; sys.path.insert(0, 'py'); import config, captcha, followup_batch, shop_followup, shop_list_reader, task_runtime, youzan_bot; print('IMPORT_CHECK=PASS')"
+$importCheck = "import sys; sys.path.insert(0, 'py'); import config, captcha, followup_batch, shop_followup, shop_list_reader, task_runtime, youzan_bot; print('IMPORT_CHECK=PASS')"
+Invoke-Checked -Executable $VenvPython -Arguments @('-c', $importCheck) -Operation 'Python 导入检查'
+Invoke-Checked -Executable $VenvPython -Arguments @('-m', 'pip', 'check') -Operation '依赖一致性检查'
 
 $edgePaths = @(
     "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
@@ -58,11 +118,6 @@ if ($edgeInstalled) {
 Write-Host ''
 Write-Host '运行环境已准备完成。' -ForegroundColor Green
 Write-Host '启动 GUI：      .\venv\Scripts\python.exe .\main.py'
-Write-Host '或直接运行：    python .\main.py'
-<<<<<<< HEAD
+Write-Host '或直接运行：    .\run.cmd'
 Write-Host '安全试运行：    .\venv\Scripts\python.exe .\main.py --fill-first3-dry'
 
-=======
-Write-Host '安全试运行：    .\venv\Scripts\python.exe .\main.py --fill-first3-dry'
-
->>>>>>> b94e3e2 (修复Python 3.14登录并持久化本地配置)
