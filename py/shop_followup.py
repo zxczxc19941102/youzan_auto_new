@@ -783,7 +783,7 @@ class ShopFollowupCase:
         self._pick_radio('跟进方式', '电话拜访')
         self._pick_radio('跟进目的', '了解需求')
         self._pick_select('沟通情况')  # 选第一个选项
-        self._fill_textarea('客户需求/备注', '有需要联系我')
+        self._fill_textarea('\u5ba2\u6237\u9700\u6c42/\u5907\u6ce8', '\u6709\u9700\u8981\u4f1a\u8054\u7cfb')
 
         if not self._confirm_dropdown():
             self.log('未发现独立「确定」按钮（下拉选项已即时生效）')

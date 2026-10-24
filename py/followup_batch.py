@@ -47,6 +47,7 @@ class FollowupBatch:
         self.results = []
         self.total_targets = 0
         self._print_lock = threading.Lock()
+        self._content_logged = False
 
     def _halted(self):
         return self.abort_event.is_set() or self.stop_event.is_set()
@@ -210,6 +211,7 @@ class FollowupBatch:
                     publish_lock=self.publish_lock,
                 )
                 result = case.run()
+                self._emit_followup_content(case.form_values)
                 success = bool(result.get('success'))
                 error = result.get('error', '')
             except TaskCancelled:
@@ -234,14 +236,7 @@ class FollowupBatch:
                        cancelled=False):
         with self._print_lock:
             if not success:
-                self.raw('正在进入店铺：%s' % (shop.get('shop_name') or '-'))
                 self._emit_steps(steps)
-            self._emit_block(
-                shop.get('shop_name') or '',
-                shop.get('kdt_id') or shop.get('shop_id') or '',
-                detail_url,
-                success,
-            )
             self.results.append({
                 'shop_name': shop.get('shop_name') or '',
                 'shop_id': shop.get('kdt_id') or shop.get('shop_id') or '',
@@ -251,6 +246,21 @@ class FollowupBatch:
                 'error': error,
                 'steps': steps,
             })
+
+    def _emit_followup_content(self, values):
+        """首次表单填完后，在主日志用代码块展示实际跟进内容。"""
+        labels = ('跟进方式', '跟进目的', '沟通情况', '客户需求/备注')
+        if not all(values.get(label) for label in labels):
+            return
+        with self._print_lock:
+            if self._content_logged:
+                return
+            self._content_logged = True
+            lines = ['%s：%s' % (label, values[label]) for label in labels]
+            fence = chr(96) * 3
+            self._note('跟进内容：\n%s\n%s\n%s' % (
+                fence, '\n'.join(lines), fence
+            ))
 
     def _step_lines(self, steps):
         wanted = {
@@ -279,17 +289,6 @@ class FollowupBatch:
     def _emit_steps(self, steps):
         for line in self._step_lines(steps):
             self.raw(line)
-
-    def _emit_block(self, name, shop_id, detail_url, success):
-        self.raw(SEPARATOR)
-        self.raw('店铺名称：%s' % (name or '-'))
-        self.raw('店铺ID：%s' % (shop_id or '-'))
-        self.raw('跟进网址：%s' % (detail_url or '-'))
-        if success:
-            self.styled('跟进记录：填写完成', 'success')
-        else:
-            self.styled('跟进记录：填写失败', 'fail')
-        self.raw(SEPARATOR)
 
     def _summary(self):
         attempted = len(self.results)
@@ -397,6 +396,7 @@ class FollowupBatch:
                 publish_lock=self.publish_lock,
             )
             result = case.run()
+            self._emit_followup_content(case.form_values)
             success = bool(result.get('success'))
             error = result.get('error', '')
         except TaskCancelled:
@@ -416,15 +416,17 @@ class FollowupBatch:
         """池线程：独占一个浏览器，顺序处理分配到的店铺，停止时立刻退出。"""
         runtime = self.runtime
         started = time.perf_counter()
-        first_name = (chunk[0][1].get('shop_name') if chunk else '') or '店铺'
-        label = '批次[%s…共%d家]' % (str(first_name)[:18], len(chunk))
+        label = '跟进批次[%d家]' % len(chunk)
         status = '成功'
         if runtime is not None:
             runtime.begin_task(label, emit=False)
         bot = None
         try:
             self._pace()   # 错峰启动浏览器，削掉并发启动的 CPU 尖峰
-            bot = YouzanBot(self.debug)
+            bot = YouzanBot(
+                self.debug,
+                proxy_server=getattr(self.bot, 'proxy_server', None),
+            )
             bot.bind_runtime(runtime)
             bot.stop_event = self.stop_event
             bot._ensure_browser(storage_state=config.AUTH_FILE)
@@ -517,7 +519,7 @@ class FollowupBatch:
         if shops is None:
             shops = self.load_all_shops() if all_shops else self.load_first_page()
         if announce_count:
-            self.raw('当前检索到店铺一共%d个' % len(shops))
+            self.raw('开始处理%d家店铺' % len(shops))
         if all_shops:
             targets = shops[skip:]
         else:
@@ -549,10 +551,8 @@ class FollowupBatch:
         else:
             for position, shop in enumerate(targets, 1):
                 self._check()
-                self._note('店铺进度 %d/%d：%s（ID=%s）' % (
-                    position, len(targets),
-                    shop.get('shop_name') or '-',
-                    shop.get('kdt_id') or shop.get('shop_id') or '-',
+                self._note('开始填写第 %d/%d 家店铺' % (
+                    position, len(targets)
                 ))
                 ok = self._fill_one(shop, position)
                 if not ok:

@@ -179,15 +179,6 @@ class ShopListReader:
             })
         return shops
 
-    def _shop_block_lines(self, shop):
-        return [
-            SEPARATOR,
-            '店铺名称：%s' % (shop.get('shop_name') or '-'),
-            '店铺ID：%s' % (shop.get('kdt_id') or shop.get('shop_id') or '-'),
-            '跟进网址：%s' % (shop.get('detail_url') or '-'),
-            SEPARATOR,
-        ]
-
     def _find_row(self, shop_name):
         rows = self.page.locator('.fun-table tbody tr')
         for index in range(rows.count()):
@@ -369,14 +360,11 @@ class ShopListReader:
         txt_path = os.path.join(
             config.TXT_DIR, 'shop_list_%s.txt' % self.run_id
         )
+        # Keep the human-readable report concise; structured records remain local
+        # in JSON/CSV for the follow-up workflow.
         with open(txt_path, 'w', encoding='utf-8') as handle:
-            handle.write('店铺列表 URL: %s\n' % SHOP_LIST_URL)
-            handle.write('总数: %d\n' % len(self.shops))
-            for index, shop in enumerate(self.shops):
-                block = self._shop_block_lines(shop)
-                if index:
-                    block = block[1:]
-                handle.write('\n'.join(block) + '\n')
+            handle.write('\u5e97\u94fa\u5217\u8868 URL: %s\n' % SHOP_LIST_URL)
+            handle.write('\u603b\u6570: %d\n' % len(self.shops))
 
         csv_path = os.path.join(
             config.TXT_DIR, 'shop_list_%s.csv' % self.run_id
@@ -402,16 +390,77 @@ class ShopListReader:
         self.debug('店铺列表 CSV -> %s' % csv_path)
         return json_path
 
-    # ---------- 主流程 ----------
-    def run(self):
+    # ---------- 导航 ----------
+    def _is_my_shops_route(self):
+        try:
+            return 'shop/list/my' in self.page.url.lower()
+        except Exception:
+            return False
+
+    def _click_my_shops(self):
+        """优先真实点击「店铺 -> 我的店铺」，找不到时由调用方回退到路由。"""
         self._check()
-        self._attach()
-        self.debug('打开店铺列表：%s' % SHOP_LIST_URL)
+        if self._is_my_shops_route():
+            return True
+
+        selectors = (
+            'a[href*="/shop/list/my"]',
+            '[data-key*="shop/list/my"]',
+            '[data-menu-key*="shop/list/my"]',
+        )
+        for selector in selectors:
+            try:
+                items = self.page.locator(selector)
+                for index in range(min(items.count(), 6)):
+                    item = items.nth(index)
+                    if not item.is_visible():
+                        continue
+                    item.click(timeout=2500, no_wait_after=True)
+                    self.page.wait_for_timeout(300)
+                    if self._is_my_shops_route():
+                        self.log('点击：店铺--我的店铺')
+                        return True
+            except TaskCancelled:
+                raise
+            except Exception:
+                pass
+
+        # 折叠导航通常需要先展开一级「店铺」再点「我的店铺」。
+        for label in ('我的店铺', '店铺'):
+            try:
+                items = self.page.get_by_text(label, exact=True)
+                for index in range(min(items.count(), 8)):
+                    item = items.nth(index)
+                    if not item.is_visible():
+                        continue
+                    item.click(timeout=2500, no_wait_after=True)
+                    self.page.wait_for_timeout(300)
+                    if self._is_my_shops_route():
+                        self.log('点击：店铺--我的店铺')
+                        return True
+            except TaskCancelled:
+                raise
+            except Exception:
+                pass
+        return False
+
+    def _open_my_shops(self):
+        if self._click_my_shops():
+            return
+        self.debug('未找到可点击的「店铺--我的店铺」菜单，回退到列表路由')
         self.page.goto(
             SHOP_LIST_URL,
             wait_until='domcontentloaded',
             timeout=config.NAV_TIMEOUT_MS,
         )
+        self.log('打开：店铺--我的店铺（菜单不可用，已回退到列表页）')
+
+    # ---------- 主流程 ----------
+    def run(self):
+        self._check()
+        self._attach()
+        self.debug('打开店铺列表：%s' % SHOP_LIST_URL)
+        self._open_my_shops()
         self._sleep(1.5)
         if not self._wait_data(1):
             self.debug('店铺列表未加载出真实数据（接口/表格均为空）')
@@ -440,16 +489,10 @@ class ShopListReader:
                 break
             for shop in shops:
                 self._check()
-                # 接口已带 alias 时 detail_url 可直接拼出，无需逐店点「详情」开弹窗
-                # （每次约 2.4 秒，30 家约 72 秒）；仅在缺 URL 时才回退点击解析。
+                # 只有接口缺少详情地址时才回退点击「详情」解析。
                 if config.SHOP_DETAIL_RESOLVE_BY_CLICK or not shop.get('detail_url'):
                     shop['detail_url'] = self._fetch_detail_url(shop, page_no)
-                is_first = not self.shops
                 self.shops.append(shop)
-                block = self._shop_block_lines(shop)
-                if not is_first:
-                    block = block[1:]
-                self.log('\n'.join(block))
 
             if page_no >= max_page or not self._next_page():
                 break

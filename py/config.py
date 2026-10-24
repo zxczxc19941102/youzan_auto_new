@@ -116,6 +116,10 @@ DEFAULT_PWD = os.environ.get('YOUZAN_PASSWORD') or _unprotect_password(
 DEFAULT_AUTO_SHOP_LIST = _as_bool(_LOCAL_CONFIG.get('auto_shop_list'), True)
 DEFAULT_AUTO_FILL_ALL = _as_bool(_LOCAL_CONFIG.get('auto_fill_all'), True)
 DEFAULT_FILL_ALL_DRY = _as_bool(_LOCAL_CONFIG.get('fill_all_dry'), False)
+DEFAULT_PROXY_SERVER = (
+    os.environ.get('YOUZAN_PROXY_SERVER')
+    or str(_LOCAL_CONFIG.get('proxy_server') or 'http://127.0.0.1:10808').strip()
+)
 try:
     DEFAULT_WORKERS = max(1, min(10, int(_LOCAL_CONFIG.get('workers', 3))))
 except (TypeError, ValueError):
@@ -123,7 +127,8 @@ except (TypeError, ValueError):
 
 
 def save_local_config(username, password, auto_shop_list=True,
-                      auto_fill_all=True, fill_all_dry=False, workers=3):
+                      auto_fill_all=True, fill_all_dry=False, workers=3,
+                      proxy_server=None):
     """Atomically save ignored local GUI settings."""
     ensure_dirs()
     payload = {
@@ -133,6 +138,7 @@ def save_local_config(username, password, auto_shop_list=True,
         'auto_fill_all': bool(auto_fill_all),
         'fill_all_dry': bool(fill_all_dry),
         'workers': max(1, min(10, int(workers))),
+        'proxy_server': str(proxy_server or DEFAULT_PROXY_SERVER).strip(),
     }
     fd, temp_path = tempfile.mkstemp(
         prefix='.local_config_', suffix='.tmp', dir=JSON_DIR

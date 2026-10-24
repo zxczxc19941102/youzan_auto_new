@@ -1,33 +1,15 @@
-<<<<<<< HEAD
-# Python / 虚拟环境
+# Python environments and cache
 venv/
 __pycache__/
 *.py[cod]
 
-# 登录凭据（敏感）
+# Local authentication secrets (never commit)
 json/cookies.json
 json/auth_state.json
 json/local_config.json
 
-# 运行与调试产物
+# Runtime artifacts and diagnostics
 html/
 txt/
 png/
 LOG/
-=======
-# Python / 虚拟环境
-venv/
-__pycache__/
-*.py[cod]
-
-# 登录凭据（敏感）
-json/cookies.json
-json/auth_state.json
-json/local_config.json
-
-# 运行与调试产物
-html/
-txt/
-png/
-LOG/
->>>>>>> b94e3e2 (修复Python 3.14登录并持久化本地配置)

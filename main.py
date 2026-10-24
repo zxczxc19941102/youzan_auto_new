@@ -62,6 +62,7 @@ auto_shop_list_var = None  # GUI 勾选：登录成功后读取店铺列表（�
 auto_fill_all_var = None   # GUI 勾选：登录后全量填写跟进记录
 fill_all_dry_var = None    # GUI 勾选：全量跟进试运行（不发布）
 worker_count_var = None    # GUI 下拉：并发线程数
+proxy_server_var = None    # 本地代理，仅保存在本地配置
 
 # ---- 运行状态（全部由主线程读写，工作线程只投递队列） ----
 bot = None
@@ -287,6 +288,14 @@ def _ck_token_exist():
 
 
 def enable_code_ui():
+    """短信已确认发送后启用验证码控件并将主窗口提到前台。"""
+    try:
+        root.deiconify()
+        root.lift()
+        root.attributes('-topmost', True)
+        root.after(700, lambda: root.attributes('-topmost', False))
+    except tk.TclError:
+        pass
     entry_code.config(state='normal')
     btn_submit.config(state='normal')
     entry_code.focus_set()
@@ -310,6 +319,10 @@ def _read_ui_settings():
         'auto_fill_all': bool(auto_fill_all_var and auto_fill_all_var.get()),
         'fill_all_dry': bool(fill_all_dry_var and fill_all_dry_var.get()),
         'workers': _read_workers(),
+        'proxy_server': (
+            proxy_server_var.get().strip()
+            if proxy_server_var else config.DEFAULT_PROXY_SERVER
+        ),
     }
 
 
@@ -324,6 +337,7 @@ def _save_login_config(user, pwd, settings):
             auto_fill_all=settings.get('auto_fill_all', True),
             fill_all_dry=settings.get('fill_all_dry', False),
             workers=settings.get('workers', config.DEFAULT_WORKERS),
+            proxy_server=settings.get('proxy_server', config.DEFAULT_PROXY_SERVER),
         )
         log('\u672c\u673a\u914d\u7f6e\u5df2\u4fdd\u5b58\uff1a\u8d26\u53f7\u3001\u5bc6\u7801\u53ca\u754c\u9762\u9009\u9879\uff08\u4ec5\u672c\u5730\u6587\u4ef6\uff0c\u4e0d\u4e0a\u4f20\uff09')
     except Exception as exc:
@@ -429,8 +443,8 @@ def _confirm_repeat_followup(done_count):
     return answer['yes']
 
 
-def _wait_code_input(timeout=1200):
-    """等待界面提交验证码：Event 分段阻塞，停止时毫秒级返回。"""
+def _wait_code_input(timeout=300):
+    """最多等待短信验证码 5 分钟；停止时立即返回。"""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if stop_flag.is_set():
@@ -441,56 +455,54 @@ def _wait_code_input(timeout=1200):
 
 
 def _auto_followup_after_login(bot_obj, settings):
-    """登录成功后统计店铺，并按勾选执行全量跟进记录（全程步骤计时）。"""
+    """登录成功后读取店铺数量，并按勾选执行跟进记录。"""
     from followup_batch import FollowupBatch
     from shop_list_reader import ShopListReader
 
     auto_fill_all = bool(settings.get('auto_fill_all', True))
-    show_shop_list = bool(settings.get('auto_shop_list', True))
+    show_shop_count = bool(settings.get('auto_shop_list', True))
     rt = runner
+    if not auto_fill_all and not show_shop_count:
+        return {'success': True, 'skipped': True}
+
     debug_log = _make_debug_log('shop_list_run')
-    batch = FollowupBatch(bot_obj, raw_log, styled_log, debug_log, runtime=rt)
-
-    shops = []
-    reader = None
-    with _step('读取店铺列表', '只读统计，不修改数据') as outcome:
-        reader = ShopListReader(
-            bot_obj, lambda message: None, debug=debug_log, runtime=rt
-        )
-        reader.run()
-        shops = reader.shops
-        batch.reader = reader
-        outcome['value'] = '共获取 %d 家店铺' % len(shops)
-
-    raw_log('当前检索到店铺一共%d个' % len(shops))
-    if show_shop_list and reader is not None:
-        for index, shop in enumerate(shops):
-            block = reader._shop_block_lines(shop)
-            if index:
-                block = block[1:]
-            raw_log('\n'.join(block))
-
-    with _step('逐店铺统计', '识别今日已有记录的店铺') as outcome:
-        today_ids = batch.load_done_ids() | batch.today_visit_ids(shops)
-        already = [shop for shop in shops if batch.shop_ids(shop) & today_ids]
-        outcome['value'] = '今日已有记录 %d 家，待填写 %d 家' % (
-            len(already), max(0, len(shops) - len(already)),
-        )
+    reader = ShopListReader(
+        bot_obj, log, debug=debug_log, runtime=rt
+    )
+    log('开始获取店铺数')
+    read_result = reader.run()
+    shops = reader.shops
+    if not read_result.get('success') or not shops:
+        log('获取店铺数失败，未读取到店铺列表')
+        return {'success': False, 'count': len(shops)}
+    log('获取店铺数%d个' % len(shops))
 
     if stop_flag.is_set():
         log('已取消，跳过跟进记录自动化')
-        return
+        return {'success': False, 'count': len(shops), 'cancelled': True}
     if not auto_fill_all:
-        return
+        log('已关闭自动填写跟进内容，仅完成店铺数量读取')
+        return {'success': True, 'count': len(shops), 'skipped': True}
+
+    batch = FollowupBatch(
+        bot_obj, raw_log, styled_log, debug_log, runtime=rt
+    )
+    batch.reader = reader
+    with _step('统计今日已完成记录', '仅在本地判断是否重复填写') as outcome:
+        today_ids = batch.load_done_ids() | batch.today_visit_ids(shops)
+        already = [shop for shop in shops if batch.shop_ids(shop) & today_ids]
+        outcome['value'] = '已完成 %d 家，待处理 %d 家' % (
+            len(already), max(0, len(shops) - len(already)),
+        )
 
     if already:
-        log('检测到今天已有跟进记录的店铺：%d 家' % len(already))
+        log('检测到今天已有跟进记录：%d家' % len(already))
         if not _confirm_repeat_followup(len(already)):
             log('已选择不重复填写，跳过跟进记录')
-            return
+            return {'success': True, 'count': len(shops), 'skipped': True}
     if stop_flag.is_set():
-        log('已取消，跳过全量跟进')
-        return
+        log('已取消，跳过跟进内容填写')
+        return {'success': False, 'count': len(shops), 'cancelled': True}
 
     dry_run = bool(settings.get('fill_all_dry', False))
     workers = max(1, min(10, int(settings.get('workers', config.DEFAULT_WORKERS))))
@@ -508,10 +520,11 @@ def _auto_followup_after_login(bot_obj, settings):
     )
     if rt is not None:
         rt.attach_executor(executor)
+    log('开始填写跟进内容')
     with _step(
-        '逐店铺填写跟进记录',
-        '共 %d 家，并发 %d，试运行=%s' % (len(shops), workers, dry_run),
-        quiet_success=True,
+        '填写跟进内容', '共 %d 家，并发 %d，试运行=%s' % (
+            len(shops), workers, dry_run
+        ), quiet_success=True,
     ) as outcome:
         result = fill_batch.run(
             all_shops=True,
@@ -528,39 +541,44 @@ def _auto_followup_after_login(bot_obj, settings):
             result.get('cancelled', 0),
         )
     fill_debug('全量跟进结果：%s' % result)
+    log('跟进内容处理完成：成功%d家，失败%d家，终止%d家' % (
+        result.get('success', 0), result.get('failed', 0),
+        result.get('cancelled', 0),
+    ))
+    return {
+        'success': result.get('failed', 0) == 0 and result.get('cancelled', 0) == 0,
+        'count': len(shops),
+        **result,
+    }
 
 
 def login_worker(user, pwd, settings):
-    """一次完整登录尝试：免密(可选) -> 常规 -> 短信(一次性)。"""
+    """一次完整登录：验证工作台后才宣布成功，再执行选中的后续步骤。"""
     global bot
     rt = runner
     b = None
     login_debug = _make_debug_log('login')
     try:
-        # 1) 若最近一次免密失败，持续跳过旧凭据，直到常规登录成功
         if not fresh_login_requested['v'] and _ck_token_exist():
-            b = YouzanBot(login_debug)
+            b = YouzanBot(
+                login_debug, proxy_server=settings.get('proxy_server')
+            )
             b.bind_runtime(rt)
             bot = b
-            with _step('免密登录校验', '本地凭据=%s' % (
-                'auth_state' if os.path.exists(config.AUTH_FILE) else 'cookies'
-            )) as outcome:
-                mfree_ok = False
-                try:
-                    mfree_ok = b.load_cookies_and_go()
-                except TaskCancelled:
-                    raise
-                except Exception as exc:
-                    log('免密登录异常: %r' % exc)
-                outcome['value'] = '免密登录%s' % ('成功' if mfree_ok else '失败')
-            if mfree_ok:
+            mfree_ok = False
+            try:
+                mfree_ok = b.load_cookies_and_go()
+            except TaskCancelled:
+                raise
+            except Exception as exc:
+                login_debug('免密登录异常：%s' % str(exc)[:240])
+            if mfree_ok and b.confirm_workbench(timeout=2):
                 fresh_login_requested['v'] = False
-                log('登录工作台成功')
+                log('成功登录工作台')
                 _save_login_config(user, pwd, settings)
-                _auto_followup_after_login(b, settings)
-                return
-            fresh_login_requested['v'] = True
-            log('免密登录失败，转账号密码登录')
+                followup = _auto_followup_after_login(b, settings)
+                return bool(followup.get('success', True))
+            log('本地登录态不可用，转账号密码登录')
             try:
                 b.close()
             except Exception:
@@ -571,47 +589,59 @@ def login_worker(user, pwd, settings):
         if stop_flag.is_set():
             raise TaskCancelled()
 
-        # 2) 常规登录（账号密码 + 自动滑块）
-        b = YouzanBot(login_debug)
+        b = YouzanBot(
+            login_debug, proxy_server=settings.get('proxy_server')
+        )
         b.bind_runtime(rt)
         bot = b
         ok = b.start_login(user, pwd)
         if not ok:
-            log('常规登录未通过，请重新点「开始登录」')
-            return
+            log('登录失败：账号密码、验证码或登录页面状态未通过校验')
+            return False
 
-        # 3) 如需短信：自动发送 + 一次性提交
         if b.needs_sms:
             if not b.send_sms():
-                log('未能确认短信已发送，本次登录结束；请检查页面/认证接口诊断后重新开始')
-                return
-            log('短信验证码已发送，请输入验证码')
+                log('未能确认短信验证码已发送，本次登录失败')
+                return False
+            log('短信验证码已发送，请输入验证码（有效期5分钟）')
             _post_ui(enable_code_ui)
-            with _step('等待并读取验证码', '界面输入，最长等待 20 分钟') as outcome:
-                code = _wait_code_input()
-                outcome['value'] = '已获取 6 位验证码' if code else '未获取到验证码'
+            deadline = time.monotonic() + 300
+            with _step('等待短信验证码', '有效期5分钟，超时自动终止全部任务') as outcome:
+                code = _wait_code_input(timeout=max(0, deadline - time.monotonic()))
+                outcome['value'] = '已收到验证码' if code else '未收到验证码'
             if not code:
-                log('未提交验证码，本次登录结束')
-                return
+                if stop_flag.is_set():
+                    log('短信验证等待已取消')
+                else:
+                    log('短信验证码等待超过5分钟，强制终止全部线程，请重新开始登录')
+                    if rt is not None:
+                        rt.stop()
+                    else:
+                        stop_flag.set()
+                return False
             submit_result = b.submit_code(code)
             if submit_result is not True:
-                if submit_result is False:
-                    log('验证码被页面明确拒绝，本次登录结束（一次性方案）。请重新点「开始登录」')
-                else:
-                    log('验证码提交结果未能确认，本次登录结束（一次性方案）。请检查诊断信息后重新开始')
-                return
+                log('短信验证码未通过，未确认进入工作台；请重新开始登录')
+                return False
 
         fresh_login_requested['v'] = False
-        with _step('登录态校验', '确认已进入工作台') as outcome:
-            logged_in = b._is_logged_in()
-            outcome['value'] = '已登录' if logged_in else '未确认登录'
-        log('登录工作台成功')
+        if not b.confirm_workbench(timeout=8):
+            log('登录失败：未确认成功进入工作台，不执行后续步骤')
+            return False
+
+        log('成功登录工作台')
         _save_login_config(user, pwd, settings)
-        _auto_followup_after_login(b, settings)
+        followup = _auto_followup_after_login(b, settings)
+        return bool(followup.get('success', True))
     except TaskCancelled:
-        log('已被终止，中断于步骤:登录流程')
-    except Exception as e:
-        log('登录异常: %r' % e)
+        log('登录任务已终止')
+        return False
+    except Exception as exc:
+        safe_error = str(exc)
+        if pwd:
+            safe_error = safe_error.replace(pwd, '***')
+        log('登录流程失败：%s' % safe_error[:300])
+        return False
     finally:
         try:
             if b is not None:
@@ -622,31 +652,36 @@ def login_worker(user, pwd, settings):
 
 
 def _mfree_login_task(user, pwd, settings):
-    """一键免密登录任务：同样在线程池里执行。"""
+    """一键免密登录任务：验证工作台后再执行后续流程。"""
     global bot
     rt = runner
     b = None
     login_debug = _make_debug_log('login')
     try:
-        b = YouzanBot(login_debug)
+        b = YouzanBot(
+            login_debug, proxy_server=settings.get('proxy_server')
+        )
         b.bind_runtime(rt)
         bot = b
-        with _step('免密登录校验', '使用本地 CK 直接访问工作台') as outcome:
-            ok = b.load_cookies_and_go()
-            outcome['value'] = '免密登录%s' % ('成功' if ok else '失败')
-        if ok:
-            fresh_login_requested['v'] = False
-            log('登录工作台成功')
-            _save_login_config(user, pwd, settings)
-            _auto_followup_after_login(b, settings)
-        else:
+        ok = b.load_cookies_and_go() and b.confirm_workbench(timeout=2)
+        if not ok:
             fresh_login_requested['v'] = True
-            log('免密登录失败，请点「开始登录」')
+            log('免密登录未能确认进入工作台，请点「开始登录」')
+            return False
+
+        fresh_login_requested['v'] = False
+        log('成功登录工作台')
+        _save_login_config(user, pwd, settings)
+        followup = _auto_followup_after_login(b, settings)
+        return bool(followup.get('success', True))
     except TaskCancelled:
         log('免密登录任务已终止')
-    except Exception as e:
+        return False
+    except Exception as exc:
         fresh_login_requested['v'] = True
-        log('免密登录异常，已标记旧凭据失效：%r' % e)
+        safe_error = str(exc).replace(pwd, '***') if pwd else str(exc)
+        log('免密登录失败：%s' % safe_error[:300])
+        return False
     finally:
         try:
             if b is not None:
@@ -654,6 +689,7 @@ def _mfree_login_task(user, pwd, settings):
         except Exception:
             pass
         bot = None
+
 
 
 def _mask_account(account):
@@ -705,10 +741,10 @@ def on_ck():
     if not _ck_token_exist():
         log_error('没有本地登录凭据，请先点「开始登录」')
         return
-    rt = _start_runtime()
     user = (entry_user.get() or '').strip()
     pwd = (entry_pwd.get() or '').strip()
     settings = _read_ui_settings()
+    rt = _start_runtime()
     rt.submit('\u514d\u5bc6\u767b\u5f55', _mfree_login_task, user, pwd, settings)
 
 
@@ -729,9 +765,10 @@ def run_gui():
     global root, entry_user, entry_pwd, entry_code, log_widget
     global btn_start, btn_submit, btn_ck, btn_stop
     global auto_shop_list_var, auto_fill_all_var, fill_all_dry_var, worker_count_var
+    global proxy_server_var
     root = tk.Tk()
     root.title('有赞后台自动登录（滑块+短信+抓CK）')
-    root.geometry('720x650')
+    root.geometry('760x700')
 
     frm = tk.Frame(root)
     frm.pack(fill='x', padx=10, pady=8)
@@ -773,7 +810,7 @@ def run_gui():
     auto_shop_list_var = tk.BooleanVar(value=config.DEFAULT_AUTO_SHOP_LIST)
     tk.Checkbutton(
         frm,
-        text='登录后读取店铺列表并输出日志（只读，不修改数据）',
+        text='登录后读取店铺数量（只读）',
         variable=auto_shop_list_var,
     ).grid(row=3, column=0, columnspan=2, sticky='w', pady=4)
 
@@ -800,7 +837,13 @@ def run_gui():
         state='readonly',
     ).grid(row=5, column=2, sticky='w', padx=6)
 
-    tk.Label(root, text='运行日志（缺口计算 / 拖动距离 / 登录结果等关键信息全程输出）').pack(anchor='w', padx=10)
+    tk.Label(frm, text='本地代理').grid(row=6, column=0, sticky='e', padx=4, pady=4)
+    proxy_server_var = tk.StringVar(value=config.DEFAULT_PROXY_SERVER)
+    tk.Entry(frm, textvariable=proxy_server_var, width=42).grid(
+        row=6, column=1, columnspan=2, sticky='w', padx=4, pady=4
+    )
+
+    tk.Label(root, text='运行日志（登录、验证码、工作台和跟进进度）').pack(anchor='w', padx=10)
     log_widget = scrolledtext.ScrolledText(root, height=26, font=('Consolas', 10))
     log_widget.pack(fill='both', expand=True, padx=10, pady=6)
     log_widget.tag_configure(

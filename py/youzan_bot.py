@@ -27,9 +27,17 @@ def _mask_account(account):
     return account[:3] + '****' + account[-4:]
 
 
+QUIET_RUNTIME_STEPS = frozenset({
+    '初始化会话', '打开登录页', '输入账号密码', '登录态校验',
+    '滑块验证码获取', '滑块识别', '滑块拖动', '滑块结果校验',
+    '请求短信验证码', '提交验证码', '抓取 CK',
+})
+
+
 class YouzanBot:
-    def __init__(self, log):
+    def __init__(self, log, proxy_server=None):
         self.log = log
+        self.proxy_server = (config.DEFAULT_PROXY_SERVER if proxy_server is None else str(proxy_server).strip())
         self.pw = None
         self.browser = None
         self.context = None
@@ -37,6 +45,7 @@ class YouzanBot:
         self.needs_sms = False
         self.auth_requests = []
         self.auth_responses = []
+        self._login_secrets = []
         self.runtime = None
         self.stop_event = None
 
@@ -45,6 +54,12 @@ class YouzanBot:
         """绑定任务运行时：共享停止事件与统一日志、计时。"""
         self.runtime = runtime
         self.stop_event = runtime.stop_event if runtime is not None else None
+
+    def progress(self, message):
+        if self.runtime is not None:
+            self.runtime.emit(message)
+        else:
+            self.log(message)
 
     def check_stop(self):
         """停止检查点：一旦置位立刻抛出取消信号，终止后续步骤。"""
@@ -65,7 +80,11 @@ class YouzanBot:
     def step(self, name, inputs='无'):
         """步骤计时：绑定 runtime 时输出统一格式，否则退化为本地日志。"""
         if self.runtime is not None:
-            with self.runtime.step(name, inputs) as outcome:
+            with self.runtime.step(
+                name, inputs,
+                emit_start=name not in QUIET_RUNTIME_STEPS,
+                emit_success=name not in QUIET_RUNTIME_STEPS,
+            ) as outcome:
                 self.check_stop()
                 yield outcome
             return
@@ -114,9 +133,10 @@ class YouzanBot:
         """只记录认证 API 的方法和路径，不记录敏感查询参数或请求体。"""
         try:
             parsed = urlsplit(request.url)
-            if parsed.hostname not in ('account.youzan.com', 'passport.youzan.com'):
+            if (parsed.scheme != 'https' or parsed.hostname not in
+                    ('account.youzan.com', 'passport.youzan.com')):
                 return
-            if not parsed.path.startswith('/api/'):
+            if not (parsed.path.startswith('/api/') or parsed.path.endswith('.json')):
                 return
             self.auth_requests.append({'method': request.method, 'path': parsed.path})
         except Exception:
@@ -139,9 +159,10 @@ class YouzanBot:
         """只记录认证接口的状态码与业务码，不保存查询参数或响应数据。"""
         try:
             parsed = urlsplit(response.url)
-            if parsed.hostname not in ('account.youzan.com', 'passport.youzan.com'):
+            if (parsed.scheme != 'https' or parsed.hostname not in
+                    ('account.youzan.com', 'passport.youzan.com')):
                 return
-            if not parsed.path.startswith('/api/'):
+            if not (parsed.path.startswith('/api/') or parsed.path.endswith('.json')):
                 return
 
             entry = {
@@ -158,35 +179,67 @@ class YouzanBot:
                     success = payload.get('success')
                     if isinstance(success, bool):
                         entry['success'] = success
-                    for key in ('msg', 'message', 'errorMsg', 'error_message'):
+                    for key in ('msg', 'message', 'errorMsg', 'error_message', 'error'):
                         message = payload.get(key)
                         if isinstance(message, str) and message.strip():
                             message = re.sub(r'\b(?:\+?86)?1[3-9]\d{9}\b', '[phone]', message)
                             message = re.sub(r'\b\d{6,}\b', '[redacted]', message)
-                            entry['message'] = message[:160]
+                            for secret in self._login_secrets:
+                                if secret:
+                                    message = message.replace(secret, '[redacted]')
+                            message = re.sub(r'(?i)(password|passwd|token|cookie|authorization)\s*[:=?]\s*[^\s,;]+', r'\1=[redacted]', message)
+                            entry['message'] = re.sub(r'\s+', ' ', message).strip()[:160]
                             break
             except Exception:
                 pass
             self.auth_responses.append(entry)
+            # Every auth API response is logged as it arrives, including HTTP/business status.
+            details = '%s %s HTTP=%s' % (entry['method'], entry['path'], entry['status'])
+            if 'code' in entry:
+                details += ' code=%s' % entry['code']
+            if 'success' in entry:
+                details += ' success=%s' % entry['success']
+            if 'message' in entry:
+                details += ' message=%s' % entry['message']
+            self.log('\u670d\u52a1\u7aef\u54cd\u5e94\uff1a%s' % details)
         except Exception:
             pass
+
+    def _visible_login_error(self):
+        try:
+            values = self.page.evaluate("""() => {
+                const selectors = ['[role=alert]', '.el-message', '.ant-message-notice-content', '.login-error', '.error-message', '.form-error'];
+                const seen = new Set();
+                return selectors.flatMap(s => [...document.querySelectorAll(s)])
+                    .filter(el => { const r=el.getBoundingClientRect(); const t=(el.innerText||el.textContent||'').trim(); if(!t||!r.width||!r.height||seen.has(t)) return false; seen.add(t); return true; })
+                    .map(el => (el.innerText||el.textContent||'').trim()).slice(0,4);
+            }""")
+            result=[]
+            for value in values or []:
+                value=re.sub(r'\b(?:\+?86)?1[3-9]\d{9}\b','[phone]',str(value))
+                value=re.sub(r'\b\d{6,}\b','[redacted]',value)
+                for secret in self._login_secrets:
+                    if secret:
+                        value=value.replace(secret,'[redacted]')
+                value=re.sub(r'(?i)(password|passwd|token|cookie|authorization)\s*[:=?]\s*[^\s,;]+',r'\1=[redacted]',value)
+                value=re.sub(r'\s+',' ',value).strip()[:160]
+                if value: result.append(value)
+            return result
+        except Exception:
+            return []
+
+    def _log_visible_login_error(self, label):
+        messages=self._visible_login_error()
+        if messages:
+            for message in messages:
+                self.log('%s\uff1a\u9875\u9762\u63d0\u793a=%s' % (label, message))
+        else:
+            self.log('%s\uff1a\u9875\u9762\u672a\u53d1\u73b0\u53ef\u89c1\u9519\u8bef\u63d0\u793a' % label)
 
     def _log_auth_responses(self, start, label):
         responses = self.auth_responses[start:]
         if not responses:
-            self.log('%s：未捕获到认证接口响应' % label)
-            return responses
-        for item in responses:
-            details = '%s %s HTTP=%s' % (
-                item.get('method', 'GET'), item['path'], item['status']
-            )
-            if 'code' in item:
-                details += ' code=%s' % item['code']
-            if 'success' in item:
-                details += ' success=%s' % item['success']
-            if 'message' in item:
-                details += ' message=%s' % item['message']
-            self.log('%s：%s' % (label, details))
+            self.log('%s\uff1a\u9875\u9762\u672a\u53d1\u73b0\u53ef\u89c1\u9519\u8bef\u63d0\u793a' % label)
         return responses
 
     def _is_logged_in(self):
@@ -239,6 +292,21 @@ class YouzanBot:
                 return True
             self.log('点击「重新登录」失败：%r' % exc)
             return False
+
+    def _is_sms_challenge(self):
+        try:
+            return bool(self.page.evaluate("""() => {
+                const text = document.body ? document.body.innerText : '';
+                const input = document.querySelector('.account-captcha__input input');
+                return /\u9a8c\u8bc1\u624b\u673a|\u77ed\u4fe1\u9a8c\u8bc1|\u8f93\u5165\u9a8c\u8bc1/.test(text) && !!input;
+            }"""))
+        except Exception:
+            return False
+
+    def confirm_workbench(self, timeout=12):
+        if not self._is_logged_in():
+            return False
+        return self._wait_workbench_ready(timeout=timeout)
 
     def _wait_workbench_ready(self, timeout=12):
         """等待工作台导航选中或仪表盘文案出现；遇到登录页/会话冲突立即返回。"""
@@ -324,7 +392,11 @@ class YouzanBot:
         mode = 'headless 后台' if config.HEADLESS else 'headed 调试'
         self.log('启动 Edge（%s）' % mode)
         self.pw = sync_playwright().start()
-        self.browser = self.pw.chromium.launch(channel=config.BROWSER_CHANNEL, headless=config.HEADLESS)
+        launch_options = {'channel': config.BROWSER_CHANNEL, 'headless': config.HEADLESS}
+        if self.proxy_server:
+            launch_options['proxy'] = {'server': self.proxy_server}
+            self.log('\u6d4f\u89c8\u5668\u4f7f\u7528\u672c\u5730\u4ee3\u7406\uff1a%s' % self.proxy_server)
+        self.browser = self.pw.chromium.launch(**launch_options)
         context_options = {'viewport': config.VIEWPORT}
         if storage_state:
             context_options['storage_state'] = storage_state
@@ -354,6 +426,7 @@ class YouzanBot:
             outcome['value'] = '浏览器与页面已就绪'
 
         page = self.page
+        self.progress('\u767b\u5f55\u4e2d')
         request_start = len(self.auth_requests)
         response_start = len(self.auth_responses)
         phone = False
@@ -361,6 +434,8 @@ class YouzanBot:
 
         for attempt in range(2):
             self.check_stop()
+            attempt_request_start = len(self.auth_requests)
+            attempt_response_start = len(self.auth_responses)
             with self.step(
                 '打开登录页', '第 %d/2 次尝试' % (attempt + 1)
             ) as outcome:
@@ -381,6 +456,7 @@ class YouzanBot:
                 self.sleep(0.5)
                 outcome['value'] = '密码登录页已切换'
 
+            self.progress('\u8d26\u53f7\u5bc6\u7801\u8f93\u5165\u4e2d')
             with self.step(
                 '输入账号密码', '账号=%s 密码=***' % _mask_account(user)
             ) as outcome:
@@ -408,7 +484,13 @@ class YouzanBot:
             page.get_by_role('button', name=re.compile('登\\s*录')).click()
 
             self.log('滑块验证中')
-            self._solve_slider()
+            self.progress('\u9a8c\u8bc1\u7801\u9636\u6bb5')
+            slider_passed = self._solve_slider()
+            if not slider_passed:
+                self.log('\u6ed1\u5757\u672a\u786e\u8ba4\u901a\u8fc7\uff0c\u505c\u6b62\u767b\u5f55')
+                self._log_auth_diagnostics(attempt_request_start, attempt_response_start, '\u767b\u5f55\u5c1d\u8bd5\u8bca\u65ad')
+                self._log_visible_login_error('\u767b\u5f55\u5c1d\u8bd5\u8bca\u65ad')
+                return False
             phone = False
             logged_in = False
             conflict = False
@@ -418,9 +500,7 @@ class YouzanBot:
                     conflict = self._has_session_conflict()
                     if conflict:
                         break
-                    phone = page.evaluate(
-                        "() => document.body.innerText.includes('验证手机号')"
-                    )
+                    phone = self._is_sms_challenge()
                     logged_in = self._is_logged_in()
                     if phone or logged_in:
                         break
@@ -440,11 +520,18 @@ class YouzanBot:
                 break
 
             if phone or logged_in:
+                if phone:
+                    self.progress('\u624b\u673a\u9a8c\u8bc1')
                 break
+
+            self._log_auth_diagnostics(attempt_request_start, attempt_response_start, '\u767b\u5f55\u5c1d\u8bd5\u8bca\u65ad')
+            self._log_visible_login_error('\u767b\u5f55\u5c1d\u8bd5\u8bca\u65ad')
+            self.log('\u672a\u8bc6\u522b\u5230\u77ed\u4fe1\u9a8c\u8bc1\u6216\u5df2\u767b\u5f55\u72b6\u6001\uff1b\u4e0d\u81ea\u52a8\u91cd\u590d\u63d0\u4ea4\u8d26\u53f7\u5bc6\u7801')
+            break
 
         with self.step('登录态校验', '手机验证=%s 已登录=%s' % (phone, logged_in)) as outcome:
             if not phone and not logged_in:
-                self._log_auth_diagnostics(request_start, response_start, '密码登录诊断')
+                self._log_visible_login_error('\u5bc6\u7801\u767b\u5f55\u8bca\u65ad')
             self.needs_sms = bool(phone) and not logged_in
             ok = bool(phone or logged_in)
             if ok and logged_in:
@@ -507,6 +594,8 @@ class YouzanBot:
                 bgw = Image.open(io.BytesIO(bg)).size[0]
                 scale = info['bigCssW'] / bgw
                 dist = x * scale - info['blockLeft']
+                self.progress('\u5f00\u59cb\uff1a\u6ed1\u5757\u8bc6\u522b')
+                self.progress('\u6ed1\u5757\u8bc6\u522b\uff1aX=%d\uff0cY=%d' % (x, y))
                 self.log('坐标X=%d Y=%d，拖动距离=%.1fpx' % (x, y, dist))
                 outcome['value'] = '缺口坐标 X=%d Y=%d，得分=%.1f' % (x, y, score)
 
@@ -581,7 +670,13 @@ class YouzanBot:
                 ]
                 if sms_responses:
                     break
-                self.sleep(0.25)
+                # Pump Playwright response events; plain Python sleep does not dispatch them.
+                try:
+                    page.wait_for_timeout(250)
+                except Exception as exc:
+                    if not self._is_navigation_transition_error(exc):
+                        raise
+                    self.sleep(0.25)
 
             self._log_auth_diagnostics(request_start, response_start, '短信发送诊断')
             if not sms_responses:
