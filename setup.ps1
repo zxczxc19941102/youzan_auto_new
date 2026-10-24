@@ -59,5 +59,10 @@ Write-Host ''
 Write-Host '运行环境已准备完成。' -ForegroundColor Green
 Write-Host '启动 GUI：      .\venv\Scripts\python.exe .\main.py'
 Write-Host '或直接运行：    python .\main.py'
+<<<<<<< HEAD
 Write-Host '安全试运行：    .\venv\Scripts\python.exe .\main.py --fill-first3-dry'
 
+=======
+Write-Host '安全试运行：    .\venv\Scripts\python.exe .\main.py --fill-first3-dry'
+
+>>>>>>> b94e3e2 (修复Python 3.14登录并持久化本地配置)

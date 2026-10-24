@@ -7,4 +7,8 @@ if not exist "venv\Scripts\python.exe" (
   if errorlevel 1 exit /b %errorlevel%
 )
 venv\Scripts\python.exe main.py %*
+<<<<<<< HEAD
 exit /b %errorlevel%
+=======
+exit /b %errorlevel%
+>>>>>>> b94e3e2 (修复Python 3.14登录并持久化本地配置)
