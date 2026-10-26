@@ -209,6 +209,55 @@ def styled_log(text, kind):
         pass
 
 
+def _copy_log_selection():
+    """Copy the selected log text to the system clipboard."""
+    if log_widget is None or root is None:
+        return
+    try:
+        selected = log_widget.get('sel.first', 'sel.last')
+    except tk.TclError:
+        return
+    if not selected:
+        return
+    try:
+        root.clipboard_clear()
+        root.clipboard_append(selected)
+        root.update_idletasks()
+    except tk.TclError:
+        pass
+
+
+def _clear_log_widget():
+    """Clear only the visible log widget; the on-disk log remains intact."""
+    if log_widget is None:
+        return
+    try:
+        log_widget.delete('1.0', tk.END)
+    except tk.TclError:
+        pass
+
+
+def _show_log_context_menu(event):
+    """Show right-click actions for the visible log area."""
+    if log_widget is None:
+        return 'break'
+    menu = tk.Menu(log_widget, tearoff=False)
+    try:
+        has_selection = bool(log_widget.tag_ranges(tk.SEL))
+    except tk.TclError:
+        has_selection = False
+    menu.add_command(
+        label='\u590d\u5236', command=_copy_log_selection,
+        state='normal' if has_selection else 'disabled',
+    )
+    menu.add_command(label='\u6e05\u7a7a', command=_clear_log_widget)
+    try:
+        menu.tk_popup(event.x_root, event.y_root)
+    finally:
+        menu.grab_release()
+    return 'break'
+
+
 def _append(line):
     """仅主线程调用：向日志框追加一行。"""
     log_widget.insert(tk.END, line + '\n')
@@ -578,12 +627,20 @@ def _auto_followup_after_login(bot_obj, settings):
             len(already), max(0, len(shops) - len(already)),
         )
 
+    repeat_followup = False
     if already:
         pending_count = max(0, len(shops) - len(already))
-        if pending_count == 0:
-            log('\u68c0\u6d4b\u5230\u4eca\u5929\u5df2\u6709\u8ddf\u8fdb\u8bb0\u5f55\uff1a%d\u5bb6\uff0c\u5f85\u5904\u74060\u5bb6\uff0c\u81ea\u52a8\u8df3\u8fc7\u91cd\u590d\u586b\u5199' % len(already))
-            return {'success': True, 'count': len(shops), 'skipped': True}
-        log('\u68c0\u6d4b\u5230\u4eca\u5929\u5df2\u6709\u8ddf\u8fdb\u8bb0\u5f55\uff1a%d\u5bb6\uff0c\u672c\u6b21\u4ec5\u5904\u7406\u5f85\u5904\u7406 %d \u5bb6\u5e97\u94fa' % (len(already), pending_count))
+        log('\u68c0\u6d4b\u5230\u4eca\u5929\u5df2\u6709\u8ddf\u8fdb\u8bb0\u5f55\uff1a%d\u5bb6\uff0c\u5f85\u5904\u7406%d\u5bb6' % (
+            len(already), pending_count,
+        ))
+        if not _confirm_repeat_followup(len(already)):
+            log('\u7528\u6237\u62d2\u7edd\u91cd\u590d\u586b\u5199\uff0c\u672c\u6b21\u8ddf\u8fdb\u4efb\u52a1\u5df2\u53d6\u6d88')
+            return {
+                'success': False, 'count': len(shops), 'refused': True,
+                'already': len(already), 'pending': pending_count,
+            }
+        repeat_followup = True
+        log('\u7528\u6237\u9009\u62e9\u7ee7\u7eed\uff0c\u672c\u6b21\u5141\u8bb8\u91cd\u590d\u586b\u5199\u5df2\u6709\u8bb0\u5f55\u7684\u5e97\u94fa')
     if stop_flag.is_set():
         log('已取消，跳过跟进内容填写')
         return {'success': False, 'count': len(shops), 'cancelled': True}
@@ -591,8 +648,10 @@ def _auto_followup_after_login(bot_obj, settings):
     dry_run = bool(settings.get('fill_all_dry', False))
     workers = max(1, min(10, int(settings.get('workers', config.DEFAULT_WORKERS))))
     fill_debug = _make_debug_log('fill_all')
+    skip_done = not repeat_followup
+    batch_done_ids = set() if repeat_followup else today_ids
     fill_debug('全量跟进：workers=%d dry_run=%s skip_done=%s' % (
-        workers, dry_run, True
+        workers, dry_run, skip_done
     ))
     fill_batch = FollowupBatch(
         bot_obj, raw_log, styled_log, fill_debug,
@@ -613,10 +672,10 @@ def _auto_followup_after_login(bot_obj, settings):
         result = fill_batch.run(
             all_shops=True,
             workers=workers,
-            skip_done=True,
+            skip_done=skip_done,
             shops=shops,
             announce_count=False,
-            done_ids=today_ids,
+            done_ids=batch_done_ids,
             executor=executor,
         )
         outcome['value'] = '成功 %d 家，失败 %d 家，终止 %d 家' % (
@@ -928,6 +987,8 @@ def run_gui():
     tk.Label(root, text='运行日志（登录、验证码、工作台和跟进进度）').pack(anchor='w', padx=10)
     log_widget = scrolledtext.ScrolledText(root, height=26, font=('Consolas', 10))
     log_widget.pack(fill='both', expand=True, padx=10, pady=6)
+    log_widget.bind('<Button-3>', _show_log_context_menu)
+    log_widget.bind('<Control-c>', lambda _event: (_copy_log_selection(), 'break')[1])
     log_widget.tag_configure(
         'followup_success', foreground='#D40000', font=('Consolas', 10, 'bold')
     )
