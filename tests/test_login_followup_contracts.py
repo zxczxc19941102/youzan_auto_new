@@ -168,6 +168,33 @@ class RegressionTests:
         assert messages == ['\u70b9\u51fb\uff1a\u5e97\u94fa--\u6211\u7684\u5e97\u94fa']
 
     @staticmethod
+    def seven_worker_parallel_submission_uses_valid_worker_signature():
+        """Regression: seven preallocated chunks must execute, not fail in submit()."""
+        from concurrent.futures import ThreadPoolExecutor
+        import time
+
+        batch = followup_batch.FollowupBatch.__new__(followup_batch.FollowupBatch)
+        batch.executor = ThreadPoolExecutor(max_workers=7)
+        batch.debug = lambda _message: None
+        seen = []
+
+        def fake_worker(chunk):
+            time.sleep(0.01)
+            seen.append(tuple(index for index, _shop in chunk))
+
+        batch._worker = fake_worker
+        targets = [{'shop_id': str(index)} for index in range(30)]
+        try:
+            batch._run_parallel(targets, 7)
+        finally:
+            batch.executor.shutdown(wait=True)
+
+        processed = [index for chunk in seen for index in chunk]
+        assert sorted(processed) == list(range(1, 31))
+        assert len(seen) == 7
+        assert sorted(len(chunk) for chunk in seen) == [4, 4, 4, 4, 4, 5, 5]
+
+    @staticmethod
     def parallel_followup_logs_content_once_without_shop_details():
         messages = []
         batch = followup_batch.FollowupBatch.__new__(followup_batch.FollowupBatch)
@@ -209,6 +236,8 @@ def main():
          RegressionTests.only_confirmed_workbench_is_success),
         ('actual shop-menu navigation',
          RegressionTests.my_shops_navigation_is_a_real_click),
+        ('seven-worker parallel submission',
+         RegressionTests.seven_worker_parallel_submission_uses_valid_worker_signature),
         ('parallel follow-up log content',
          RegressionTests.parallel_followup_logs_content_once_without_shop_details),
     ]

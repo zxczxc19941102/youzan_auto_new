@@ -497,9 +497,12 @@ class FollowupBatch:
                 max_workers=workers, thread_name_prefix='YouzanBatch'
             )
             pool = own_pool
+        # _worker 只接收一个预分配的 chunk；此前额外传入 worker_number，
+        # 会让每个 Future 在启动前都抛出 TypeError，最终表现为“成功0/失败0”。
+        # worker 编号并不参与业务处理，直接提交 chunk 即可。
         tasks: list[Future] = [
-            pool.submit(self._worker, chunk, worker_number)
-            for worker_number, chunk in enumerate(chunks, 1)
+            pool.submit(self._worker, chunk)
+            for chunk in chunks
         ]
         try:
             # 阻塞等待而非轮询；工作线程靠停止事件在检查点自行退出
