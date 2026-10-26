@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Offline regression checks for login, proxy, and concise follow-up logging."""
 import sys
 import threading
@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / 'py'))
 
 import followup_batch  # noqa: E402
 from shop_list_reader import ShopListReader  # noqa: E402
+from shop_followup import ShopFollowupCase  # noqa: E402
 from youzan_bot import QUIET_RUNTIME_STEPS, YouzanBot  # noqa: E402
 
 
@@ -195,6 +196,52 @@ class RegressionTests:
         assert sorted(len(chunk) for chunk in seen) == [4, 4, 4, 4, 4, 5, 5]
 
     @staticmethod
+    def followup_toggle_waits_for_async_panel_and_clicks_dynamic_class():
+        class FakeFormLocator:
+            def __init__(self, page):
+                self.page = page
+
+            def filter(self, **_kwargs):
+                return self
+
+            def count(self):
+                return 1 if self.page.clicked else 0
+
+        class FakePage:
+            def __init__(self):
+                self.clicked = False
+                self.wait_timeout = None
+
+            def locator(self, _selector):
+                return FakeFormLocator(self)
+
+            def wait_for_function(self, _script, timeout=None):
+                self.wait_timeout = timeout
+
+            def evaluate(self, script):
+                if 'SidePanel_toggle' in script:
+                    self.clicked = True
+                    return {
+                        'className': 'SidePanel_toggle_dynamic SidePanel_hide_dynamic',
+                        'text': '\u62dc\u8bbf\u5546\u5bb6',
+                    }
+                return []
+
+        page = FakePage()
+        messages = []
+        case = ShopFollowupCase.__new__(ShopFollowupCase)
+        case.page = page
+        case.log = messages.append
+        case._capture = lambda _tag: None
+        case._sleep = lambda _seconds: None
+        case.stop_event = None
+
+        assert case.open_followup() == 'form ready'
+        assert page.clicked is True
+        assert page.wait_timeout == 30000
+        assert any('\u5c55\u5f00\u53f3\u4fa7\u8868\u5355' in message for message in messages)
+
+    @staticmethod
     def parallel_followup_logs_content_once_without_shop_details():
         messages = []
         batch = followup_batch.FollowupBatch.__new__(followup_batch.FollowupBatch)
@@ -238,6 +285,8 @@ def main():
          RegressionTests.my_shops_navigation_is_a_real_click),
         ('seven-worker parallel submission',
          RegressionTests.seven_worker_parallel_submission_uses_valid_worker_signature),
+        ('async follow-up panel toggle',
+         RegressionTests.followup_toggle_waits_for_async_panel_and_clicks_dynamic_class),
         ('parallel follow-up log content',
          RegressionTests.parallel_followup_logs_content_once_without_shop_details),
     ]

@@ -588,50 +588,140 @@ class ShopFollowupCase:
     # ---------- 步骤 4：跟进表单 ----------
     def _has_followup_form(self):
         return self.page.locator('.fun-form-item:visible').filter(
-            has_text='跟进方式'
+            has_text='\u8ddf\u8fdb\u65b9\u5f0f'
         ).count() > 0
 
+    def _wait_for_followup_panel(self):
+        """Wait for the SPA to mount the follow-up toggle or form."""
+        script = r"""() => {
+            const visible = el => {
+                const rect = el.getBoundingClientRect();
+                const style = getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 &&
+                    style.display !== 'none' && style.visibility !== 'hidden' &&
+                    style.opacity !== '0';
+            };
+            const text = el => (el.innerText || el.textContent || '')
+                .replace(/\s+/g, ' ').trim();
+            const formReady = [...document.querySelectorAll('.fun-form-item')]
+                .some(el => visible(el) && text(el).includes('\u8ddf\u8fdb\u65b9\u5f0f'));
+            const toggleReady = [...document.querySelectorAll(
+                '[class*="SidePanel_toggle"], [data-testid*="visit" i]'
+            )].some(el => visible(el) && text(el).includes('\u62dc\u8bbf\u5546\u5bb6'));
+            return formReady || toggleReady;
+        }"""
+        try:
+            self.page.wait_for_function(
+                script, timeout=config.FOLLOWUP_FORM_TIMEOUT_MS
+            )
+            return True
+        except TaskCancelled:
+            raise
+        except Exception:
+            return False
+
+    def _click_followup_toggle(self):
+        """Click the dynamic CSS-module right-side follow-up toggle."""
+        script = r"""() => {
+            const visible = el => {
+                const rect = el.getBoundingClientRect();
+                const style = getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0 &&
+                    style.display !== 'none' && style.visibility !== 'hidden' &&
+                    style.opacity !== '0';
+            };
+            const text = el => (el.innerText || el.textContent || '')
+                .replace(/\s+/g, ' ').trim();
+            const candidates = [...document.querySelectorAll(
+                '[class*="SidePanel_toggle"], [data-testid*="visit" i]'
+            )];
+            const el = candidates.find(node =>
+                visible(node) && text(node) === '\u62dc\u8bbf\u5546\u5bb6'
+            ) || candidates.find(node =>
+                visible(node) && text(node).includes('\u62dc\u8bbf\u5546\u5bb6')
+            );
+            if (!el) return null;
+            el.scrollIntoView({block: 'center', inline: 'nearest'});
+            el.click();
+            return {
+                className: String(el.className || ''),
+                text: text(el),
+            };
+        }"""
+        return self.page.evaluate(script)
+
+    def _followup_panel_diagnostics(self):
+        script = r"""() => [...document.querySelectorAll(
+            '[class*="SidePanel"], [class*="fun-form"], button, [role="button"]'
+        )].map(el => {
+            const rect = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            return {
+                text: (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+                className: String(el.className || '').slice(0, 160),
+                visible: rect.width > 0 && rect.height > 0 &&
+                    style.display !== 'none' && style.visibility !== 'hidden',
+            };
+        }).filter(item => item.text).slice(-20)"""
+        try:
+            return self.page.evaluate(script)
+        except Exception:
+            return []
+
     def open_followup(self):
-        # 右侧“拜访商家”面板默认可能是收起状态（SidePanel_hide），先展开
-        toggle = self.page.locator('[class*="SidePanel_toggle"]').filter(
-            has_text='拜访商家'
-        ).first
-        for _ in range(20):
-            if toggle.count():
-                break
-            self._sleep(0.25)
-        if not toggle.count():
-            toggle = self.page.locator('[class*="SidePanel_toggle"]').first
-        if toggle.count():
-            classes = toggle.get_attribute('class') or ''
-            self.log('拜访商家面板开关状态：%s' % classes)
-            if 'hide' in classes.lower():
-                toggle.evaluate("el => el.click()")
-                self.log('已点击「拜访商家」，展开右侧表单')
-                self._sleep(0.6)
-            else:
-                self.log('「拜访商家」面板已展开，无需重复点击')
+        if self._has_followup_form():
+            self.log('\u8ddf\u8fdb\u8bb0\u5f55\u8868\u5355\u5df2\u5c55\u5f00\uff0c\u65e0\u9700\u91cd\u590d\u70b9\u51fb')
         else:
-            self.log('未找到「拜访商家」开关，尝试使用当前表单')
-
-        for _ in range(40):
-            item = self.page.locator('.fun-form-item:visible').filter(
-                has_text='跟进方式'
-            ).first
-            if item.count():
-                box = item.bounding_box()
-                if box:
-                    self.log('表单位置 x=%d y=%d' % (box['x'], box['y']))
-                    break
-            self._sleep(0.25)
+            ready = self._wait_for_followup_panel()
+            if ready and not self._has_followup_form():
+                toggle = self._click_followup_toggle()
+                if toggle:
+                    self.log('\u5df2\u70b9\u51fb\u300c\u62dc\u8bbf\u5546\u5bb6\u300d\uff0c\u5c55\u5f00\u53f3\u4fa7\u8868\u5355\uff08%s\uff09' % (
+                        toggle.get('className') or '\u52a8\u6001\u5f00\u5173',
+                    ))
+                else:
+                    self.log('\u68c0\u6d4b\u5230\u8ddf\u8fdb\u9762\u677f\u52a0\u8f7d\uff0c\u4f46\u672a\u627e\u5230\u53ef\u70b9\u51fb\u7684\u300c\u62dc\u8bbf\u5546\u5bb6\u300d\u5f00\u5173')
+            else:
+                self.log('\u7b49\u5f85\u300c\u62dc\u8bbf\u5546\u5bb6\u300d\u9762\u677f\u8d85\u65f6\uff08%dms\uff09' % (
+                    config.FOLLOWUP_FORM_TIMEOUT_MS,
+                ))
 
         if not self._has_followup_form():
-            tab = self.page.locator('.fun-tab-bar-tab').filter(has_text='跟进记录')
+            try:
+                self.page.wait_for_function(
+                    r"""() => {
+                        const visible = el => {
+                            const rect = el.getBoundingClientRect();
+                            const style = getComputedStyle(el);
+                            return rect.width > 0 && rect.height > 0 &&
+                                style.display !== 'none' && style.visibility !== 'hidden';
+                        };
+                        return [...document.querySelectorAll('.fun-form-item')]
+                            .some(el => visible(el) &&
+                                (el.innerText || el.textContent || '').includes('\u8ddf\u8fdb\u65b9\u5f0f'));
+                    }""",
+                    timeout=config.FOLLOWUP_FORM_TIMEOUT_MS,
+                )
+            except TaskCancelled:
+                raise
+            except Exception:
+                pass
+
+        if not self._has_followup_form():
+            tab = self.page.locator('.fun-tab-bar-tab').filter(has_text='\u8ddf\u8fdb\u8bb0\u5f55')
             if tab.count():
-                tab.first.evaluate("el => el.click()")
+                tab.first.click(force=True)
                 self._sleep(0.8)
+
         if not self._has_followup_form():
-            raise RuntimeError('未找到跟进记录表单（.fun-form-item）')
+            details = self._followup_panel_diagnostics()
+            self.log('\u8ddf\u8fdb\u8868\u5355\u4ecd\u672a\u51fa\u73b0\uff0c\u9875\u9762\u63a7\u4ef6\u8bca\u65ad\uff1a%s' % json.dumps(
+                details, ensure_ascii=False, separators=(',', ':')
+            )[:2000])
+            raise RuntimeError(
+                '\u672a\u627e\u5230\u8ddf\u8fdb\u8bb0\u5f55\u8868\u5355\uff08\u7b49\u5f85%dms\u540e\u4ecd\u65e0 .fun-form-item/\u8ddf\u8fdb\u65b9\u5f0f\uff09' %
+                config.FOLLOWUP_FORM_TIMEOUT_MS
+            )
         self._capture('followup_form')
         return 'form ready'
 

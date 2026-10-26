@@ -186,6 +186,7 @@ ACTION_TIMEOUT_MS = 20000       # 单次点击/填表/等待元素
 NAV_TIMEOUT_MS = 45000          # 页面跳转
 DETAIL_NAV_TIMEOUT_MS = 30000   # 店铺详情（hash 路由，commit 即返回更快）
 ASSERT_TIMEOUT_MS = 15000       # 断言类等待（wait_for_function / load_state）
+FOLLOWUP_FORM_TIMEOUT_MS = 30000  # async follow-up panel/form render timeout
 
 # 重试与限速：失败指数退避，请求之间随机停顿，避免高频空转压垮对端与本机
 RETRY_ATTEMPTS = 2              # 单个网络动作最大尝试次数
