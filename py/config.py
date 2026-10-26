@@ -10,6 +10,7 @@ from ctypes import wintypes
 
 # 目录（config.py 在 py/ 下，项目根目录是它的上一级）
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECT_CONFIG_FILE = os.path.join(BASE_DIR, 'project_config.json')
 PY_DIR = os.path.join(BASE_DIR, 'py')
 JSON_DIR = os.path.join(BASE_DIR, 'json')
 HTML_DIR = os.path.join(BASE_DIR, 'html')
@@ -31,12 +32,22 @@ SMS_CODE_FILE = os.path.join(TXT_DIR, 'sms_code.txt')
 LOCAL_CONFIG_FILE = os.path.join(JSON_DIR, 'local_config.json')
 
 
+LOCAL_CONFIG_LOAD_ERROR = ''
+LOCAL_CONFIG_EXISTS = os.path.exists(LOCAL_CONFIG_FILE)
+
 def _load_local_config():
+    global LOCAL_CONFIG_LOAD_ERROR
     try:
         with open(LOCAL_CONFIG_FILE, 'r', encoding='utf-8') as handle:
             data = json.load(handle)
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError, TypeError):
+        if not isinstance(data, dict):
+            LOCAL_CONFIG_LOAD_ERROR = 'local config must be a JSON object'
+            return {}
+        return data
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError, TypeError) as exc:
+        LOCAL_CONFIG_LOAD_ERROR = str(exc)
         return {}
 
 

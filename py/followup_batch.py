@@ -39,7 +39,7 @@ class FollowupBatch:
         self.abort_event = threading.Event()   # 批次内失败快速停止，不混同全局取消
         # Same-account writes are serialized by the server; keep reads and
         # form filling concurrent, but protect the publish critical section.
-        self.publish_lock = publish_lock or threading.Lock()
+        self.publish_lock = publish_lock
         self.run_id = time.strftime('%Y%m%d_%H%M%S')
         self.reader = ShopListReader(
             bot, lambda message: None, debug=debug_log, runtime=runtime
@@ -469,12 +469,26 @@ class FollowupBatch:
             if runtime is not None:
                 runtime.end_task(label, status, started, emit=True)
 
+    @staticmethod
+    def _partition_targets(targets, workers):
+        """Preallocate contiguous chunks; earlier workers receive one extra item."""
+        indexed = list(enumerate(targets, 1))
+        workers = max(1, min(int(workers), len(indexed) or 1))
+        base, remainder = divmod(len(indexed), workers)
+        chunks = []
+        cursor = 0
+        for worker_number in range(workers):
+            size = base + (1 if worker_number < remainder else 0)
+            chunks.append(indexed[cursor:cursor + size])
+            cursor += size
+        return chunks
+
+
     def _run_parallel(self, targets, workers):
         """把店铺切片提交到受控线程池，池容量严格等于下拉框选定的并发数。"""
         workers = max(1, min(workers, len(targets)))
         self.debug('并发填写：%d 家，%d 线程' % (len(targets), workers))
-        indexed = list(enumerate(targets, 1))
-        chunks = [indexed[offset::workers] for offset in range(workers)]
+        chunks = self._partition_targets(targets, workers)
         own_pool = None
         pool = self.executor
         if pool is None:
@@ -483,7 +497,10 @@ class FollowupBatch:
                 max_workers=workers, thread_name_prefix='YouzanBatch'
             )
             pool = own_pool
-        tasks: list[Future] = [pool.submit(self._worker, chunk) for chunk in chunks]
+        tasks: list[Future] = [
+            pool.submit(self._worker, chunk, worker_number)
+            for worker_number, chunk in enumerate(chunks, 1)
+        ]
         try:
             # 阻塞等待而非轮询；工作线程靠停止事件在检查点自行退出
             wait_futures(tasks)

@@ -6,7 +6,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $MyInvocation.MyCommand.Path)).TrimEnd('\', '/')
 Set-Location -LiteralPath $ProjectRoot
-$VenvRoot = Join-Path $ProjectRoot 'venv'
+$VenvRoot = Join-Path $ProjectRoot '.venv'
 $VenvPython = Join-Path $VenvRoot 'Scripts\python.exe'
 
 function Test-PythonExecutable {
@@ -117,7 +117,7 @@ if ($edgeInstalled) {
 
 Write-Host ''
 Write-Host '运行环境已准备完成。' -ForegroundColor Green
-Write-Host '启动 GUI：      .\venv\Scripts\python.exe .\main.py'
+Write-Host '启动 GUI：      .\.venv\Scripts\python.exe .\main.py'
 Write-Host '或直接运行：    .\run.cmd'
-Write-Host '安全试运行：    .\venv\Scripts\python.exe .\main.py --fill-first3-dry'
+Write-Host '安全试运行：    .\.venv\Scripts\python.exe .\main.py --fill-first3-dry'
 

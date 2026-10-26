@@ -10,7 +10,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\setup.ps1
 ```
 
-脚本会创建 `venv`、安装 `requirements.txt` 中的依赖，并检查 Python 模块和 Microsoft Edge。`venv/` 属于本机运行环境，已被 `.gitignore` 排除，不需要提交到仓库。
+脚本会创建 `.venv`、安装 `requirements.txt` 中的依赖，并检查 Python 模块和 Microsoft Edge。`.venv/` 属于本机运行环境，已被 `.gitignore` 排除，不需要提交到仓库。
 
 ## 启动
 
@@ -23,7 +23,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 也可以直接运行：
 
 ```powershell
-.\venv\Scripts\python.exe .\main.py
+.\.venv\Scripts\python.exe .\main.py
 ```
 
 账号密码建议使用环境变量，不要写入代码或提交到 Git：
@@ -56,7 +56,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\setup.ps1
 ```
 
-脚本会创建 `venv`、安装 `requirements.txt` 中的依赖，并检查 Python 模块和 Microsoft Edge。`venv/` 属于本机运行环境，已被 `.gitignore` 排除，不需要提交到仓库。
+脚本会创建 `.venv`、安装 `requirements.txt` 中的依赖，并检查 Python 模块和 Microsoft Edge。`.venv/` 属于本机运行环境，已被 `.gitignore` 排除，不需要提交到仓库。
 
 ## 启动
 
@@ -69,7 +69,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 也可以直接运行：
 
 ```powershell
-.\venv\Scripts\python.exe .\main.py
+.\.venv\Scripts\python.exe .\main.py
 ```
 
 账号密码建议使用环境变量，不要写入代码或提交到 Git：

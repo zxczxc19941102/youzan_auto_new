@@ -23,14 +23,56 @@
 """
 import os
 import sys
+import json
 import subprocess
 
 # ---- 自动切换到项目 venv 的 python（保证 playwright/pillow/numpy 可用）----
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_VENV = os.path.join(_HERE, 'venv')
-_VENV_PY = os.path.join(_VENV, 'Scripts', 'python.exe')
+_RUNTIME_CONFIG_FILE = os.path.join(_HERE, 'project_config.json')
+_RUNTIME_DEFAULTS = {
+    'venv_dir': '.venv',
+    'python_executable_windows': os.path.join('Scripts', 'python.exe'),
+    'python_executable_posix': os.path.join('bin', 'python'),
+}
+try:
+    with open(_RUNTIME_CONFIG_FILE, 'r', encoding='utf-8') as _handle:
+        _RUNTIME_CONFIG = dict(_RUNTIME_DEFAULTS)
+        _RUNTIME_CONFIG.update(json.load(_handle))
+except FileNotFoundError as _exc:
+    raise SystemExit(
+        'Project runtime config is missing: %s; restore project_config.json and retry' % _RUNTIME_CONFIG_FILE
+    )
+except (OSError, ValueError, TypeError) as _exc:
+    raise SystemExit(
+        'Project runtime config project_config.json could not be read: %s' % _exc
+    )
+
+def _project_relative_path(value, default):
+    value = str(value or default)
+    if os.path.isabs(value):
+        raise SystemExit('Project runtime paths must be relative: %s' % value)
+    return value
+
+
+_VENV_REL = _project_relative_path(_RUNTIME_CONFIG.get('venv_dir'), '.venv')
+_VENV_PY_REL = _project_relative_path(
+    _RUNTIME_CONFIG.get('python_executable_windows')
+    if os.name == 'nt'
+    else _RUNTIME_CONFIG.get('python_executable_posix'),
+    _RUNTIME_DEFAULTS['python_executable_windows'],
+)
+_VENV = os.path.abspath(os.path.join(_HERE, _VENV_REL))
+_VENV_PY = os.path.abspath(os.path.join(_VENV, _VENV_PY_REL))
 if os.path.isdir(_VENV) and os.path.normcase(os.path.abspath(sys.prefix)) != os.path.normcase(os.path.abspath(_VENV)):
+    if not os.path.isfile(_VENV_PY):
+        raise SystemExit(
+            'Project virtual-environment interpreter is missing: %s; run setup.ps1 to create .venv' % _VENV_PY
+        )
     raise SystemExit(subprocess.call([_VENV_PY, os.path.abspath(__file__)] + sys.argv[1:]))
+if os.path.abspath(sys.prefix) != _VENV and not os.path.isfile(_VENV_PY):
+    raise SystemExit(
+        'Project .venv interpreter was not found: %s; run .\\setup.ps1 first' % _VENV_PY
+    )
 
 # ---- 源码模块归档在 py/，加入 import 路径（入口 main.py 固定留在项目根目录）----
 _PY_DIR = os.path.join(_HERE, 'py')
@@ -324,6 +366,47 @@ def _read_ui_settings():
             if proxy_server_var else config.DEFAULT_PROXY_SERVER
         ),
     }
+
+
+credential_ui_sync = {'ok': False, 'expected_user': '', 'expected_pwd': ''}
+
+
+def _sync_saved_credentials_to_ui():
+    """Populate saved credentials after Tk controls exist and verify by reading them back."""
+    expected_user = str(config.DEFAULT_USER or '')
+    expected_pwd = str(config.DEFAULT_PWD or '')
+    credential_ui_sync.update({
+        'ok': False,
+        'expected_user': expected_user,
+        'expected_pwd': expected_pwd,
+    })
+    if entry_user is None or entry_pwd is None:
+        log_error('Credential UI sync failed: input controls are not initialized')
+        return False
+    try:
+        entry_user.delete(0, tk.END)
+        entry_user.insert(0, expected_user)
+        entry_pwd.delete(0, tk.END)
+        entry_pwd.insert(0, expected_pwd)
+        actual_user = str(entry_user.get() or '')
+        actual_pwd = str(entry_pwd.get() or '')
+    except Exception as exc:
+        log_error('Credential UI sync failed while writing controls: %s' % exc)
+        return False
+    if actual_user != expected_user or actual_pwd != expected_pwd:
+        log_error(
+            'Credential UI read-back failed: username_equal=%s password_equal=%s'
+            % (actual_user == expected_user, actual_pwd == expected_pwd)
+        )
+        return False
+    credential_ui_sync['ok'] = True
+    if expected_user or expected_pwd:
+        log('Saved credentials populated into UI; read-back passed: account=%s password=loaded' % _mask_account(expected_user))
+    else:
+        log('No saved credentials found; waiting for manual input')
+    if getattr(config, 'LOCAL_CONFIG_LOAD_ERROR', ''):
+        log_error('Local config read error: %s' % config.LOCAL_CONFIG_LOAD_ERROR)
+    return True
 
 
 def _save_login_config(user, pwd, settings):
@@ -777,12 +860,10 @@ def run_gui():
     tk.Label(frm, text='账号').grid(row=0, column=0, sticky='e')
     entry_user = tk.Entry(frm, width=24)
     entry_user.grid(row=0, column=1, padx=4)
-    entry_user.insert(0, config.DEFAULT_USER)
 
     tk.Label(frm, text='密码').grid(row=1, column=0, sticky='e')
     entry_pwd = tk.Entry(frm, width=24, show='*')
     entry_pwd.grid(row=1, column=1, padx=4)
-    entry_pwd.insert(0, config.DEFAULT_PWD)
 
     tk.Label(frm, text='验证码').grid(row=2, column=0, sticky='e')
     entry_code = tk.Entry(frm, width=24, state='disabled')
@@ -861,6 +942,7 @@ def run_gui():
     # 主线程定时批量刷新日志 + 轮询任务收尾，工作线程只入队
     root.after(LOG_FLUSH_MS, _drain_log_queue)
     root.after(200, _poll_run_state)
+    root.after_idle(_sync_saved_credentials_to_ui)
     log('日志文件：%s' % _ensure_log_file())
     if config.LOCAL_PASSWORD_MIGRATION_REQUIRED:
         log_error('\u672c\u5730\u65e7\u7248\u660e\u6587\u5bc6\u7801\u4e0d\u4f1a\u81ea\u52a8\u4f7f\u7528\uff1b\u8bf7\u91cd\u65b0\u8f93\u5165\u5bc6\u7801\uff0c\u767b\u5f55\u6210\u529f\u540e\u5c06\u4ee5 Windows DPAPI \u4fdd\u62a4\u4fdd\u5b58')

@@ -1,0 +1,6 @@
+{
+  "venv_dir": ".venv",
+  "python_executable_windows": "Scripts/python.exe",
+  "python_executable_posix": "bin/python",
+  "config_file": "project_config.json"
+}

@@ -21,14 +21,14 @@ youzan_auto/
 ├─ html/                登录成功后的页面源码（带时间戳）
 ├─ txt/                 诊断/报告/短信验证码中转文件
 ├─ png/                 调试截图
-└─ venv/                虚拟环境
+└─ .venv/                虚拟环境
 ```
 
 > `json/`、`html/`、`txt/`、`png/` 由程序自动创建；这些是运行产物，已在 `.gitignore` 中排除。
 
 ## 运行
 
-`main.py` 启动时会自动切换到项目自带的 `venv` 解释器，并把 `py/` 加入模块搜索路径，所以在哪个目录用哪个 python 跑都可以：
+`main.py` 启动时会自动切换到项目自带的 `.venv` 解释器，并把 `py/` 加入模块搜索路径，所以在哪个目录用哪个 python 跑都可以：
 
 ```powershell
 cd e:\Codebuddysoft\有赞客户跟进\youzan_auto
@@ -36,7 +36,7 @@ python main.py            # 图形界面
 python main.py --smoke    # 无 GUI 冒烟，验证能跑到短信阶段
 
 # 也可显式指定 venv 解释器：
-.\venv\Scripts\python.exe main.py
+.\.venv\Scripts\python.exe main.py
 ```
 
 账号密码通过环境变量提供，不写入源码：
@@ -193,7 +193,7 @@ python main.py --test-followup       # 真实点击发布，会新增一条跟�
 
 ## 依赖 / 配置
 
-- 依赖：`playwright / pillow / numpy`（`venv\Scripts\pip install -r requirements.txt`）
+- 依赖：`playwright / pillow / numpy`（`.venv\Scripts\pip install -r requirements.txt`）
 - 浏览器：复用系统 Edge（`config.BROWSER_CHANNEL='msedge'`），无需额外下载 chromium。
 - 配置：改 `py/config.py`（URL、HEADLESS、默认账号、各归档目录等）。
 
@@ -218,7 +218,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 `setup.ps1` 会自动完成以下工作：
 
-1. 创建项目虚拟环境 `venv`；
+1. 创建项目虚拟环境 `.venv`；
 2. 安装 `requirements.txt` 中的依赖；
 3. 检查核心模块是否能够导入；
 4. 检查系统 Microsoft Edge 是否存在。
@@ -237,7 +237,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 也可以显式调用虚拟环境解释器：
 
 ```powershell
-.\venv\Scripts\python.exe .\main.py
+.\.venv\Scripts\python.exe .\main.py
 ```
 
 ### 运行前检查
@@ -300,7 +300,7 @@ $env:YOUZAN_PASSWORD = '你的密码'
 确认 Microsoft Edge 已安装并可正常打开。如果依赖损坏，执行：
 
 ```powershell
-.\venv\Scripts\python.exe -m pip install --upgrade -r .\requirements.txt
+.\.venv\Scripts\python.exe -m pip install --upgrade -r .\requirements.txt
 ```
 
 项目默认复用系统 Edge，不需要额外下载 Chromium。
@@ -400,7 +400,7 @@ python main.py --test-followup       # 真实点击发布，会新增一条跟�
 
 ## 依赖 / 配置
 
-- 依赖：`playwright / pillow / numpy`（`venv\Scripts\pip install -r requirements.txt`）
+- 依赖：`playwright / pillow / numpy`（`.venv\Scripts\pip install -r requirements.txt`）
 - 浏览器：复用系统 Edge（`config.BROWSER_CHANNEL='msedge'`），无需额外下载 chromium。
 - 配置：改 `py/config.py`（URL、HEADLESS、默认账号、各归档目录等）。
 
@@ -425,7 +425,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 `setup.ps1` 会自动完成以下工作：
 
-1. 创建项目虚拟环境 `venv`；
+1. 创建项目虚拟环境 `.venv`；
 2. 安装 `requirements.txt` 中的依赖；
 3. 检查核心模块是否能够导入；
 4. 检查系统 Microsoft Edge 是否存在。
@@ -444,7 +444,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 也可以显式调用虚拟环境解释器：
 
 ```powershell
-.\venv\Scripts\python.exe .\main.py
+.\.venv\Scripts\python.exe .\main.py
 ```
 
 ### 运行前检查
@@ -507,7 +507,7 @@ $env:YOUZAN_PASSWORD = '你的密码'
 确认 Microsoft Edge 已安装并可正常打开。如果依赖损坏，执行：
 
 ```powershell
-.\venv\Scripts\python.exe -m pip install --upgrade -r .\requirements.txt
+.\.venv\Scripts\python.exe -m pip install --upgrade -r .\requirements.txt
 ```
 
 项目默认复用系统 Edge，不需要额外下载 Chromium。
@@ -531,9 +531,9 @@ $env:YOUZAN_SMS_CODE = '123456'
 ```powershell
 >>>>>>> b94e3e2 (修复Python 3.14登录并持久化本地配置)
 $files = @('.\main.py') + (Get-ChildItem .\py -Filter *.py | ForEach-Object FullName) + (Get-ChildItem .\tests -Filter *.py | ForEach-Object FullName)
-.\venv\Scripts\python.exe -m py_compile $files
-.\venv\Scripts\python.exe .\tests\test_verify_false_negative.py
-.\venv\Scripts\python.exe .\tests\test_publish_wait.py
+.\.venv\Scripts\python.exe -m py_compile $files
+.\.venv\Scripts\python.exe .\tests\test_verify_false_negative.py
+.\.venv\Scripts\python.exe .\tests\test_publish_wait.py
 git diff --check
 <<<<<<< HEAD
 ```
