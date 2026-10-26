@@ -140,14 +140,6 @@ def test_log_copy_and_clear_actions():
         main.root, main.log_widget = old_root, old_widget
         root.destroy()
 
-def test_partition_is_contiguous_complete_and_unique():
-    targets = [{'shop_id': str(i)} for i in range(10)]
-    chunks = FollowupBatch._partition_targets(targets, 3)
-    assert [len(chunk) for chunk in chunks] == [4, 3, 3]
-    flattened = [item['shop_id'] for chunk in chunks for _, item in chunk]
-    assert flattened == [str(i) for i in range(10)]
-
-
 def test_thread_pool_io_tasks_overlap():
     started = []
     lock = threading.Lock()
@@ -171,6 +163,5 @@ if __name__ == '__main__':
     test_repeat_followup_asks_and_allows_explicit_continue()
     test_repeat_followup_refusal_stops_without_running_batch()
     test_log_copy_and_clear_actions()
-    test_partition_is_contiguous_complete_and_unique()
     test_thread_pool_io_tasks_overlap()
     print('PASS UI sync and concurrency overlap')

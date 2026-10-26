@@ -237,6 +237,7 @@ class ShopFollowupCase:
         self.list_dump_path = ''
         self.form_values = {}
         self.publish_response = None
+        self.server_warnings = []
         self._publish_before = 0     # 发布前的接口记录游标，用于事后补取响应
         self.viewport = 1600
         self.detail_dump_path = ''
@@ -948,9 +949,14 @@ class ShopFollowupCase:
         for item in warnings or []:
             if not isinstance(item, dict):
                 continue
+            code = str(item.get('code') or '')
             message = str(item.get('message') or '')
-            if str(item.get('code')) == '4' or '太快' in message:
-                self.log('接口提示：%s（记录已写入，建议降低并发或加长间隔）' % message)
+            if code == '4' or '\u592a\u5feb' in message:
+                warning = {'code': code, 'message': message}
+                self.server_warnings.append(warning)
+                self.log('\u670d\u52a1\u5668\u4e1a\u52a1\u63d0\u793a\uff1acode=%s\uff0c%s\uff08\u8bb0\u5f55\u5df2\u5199\u5165\uff0c\u5f53\u524d\u4efb\u52a1\u7ee7\u7eed\uff09' % (
+                    code or '-', message or '\u672a\u63d0\u4f9b\u8bf4\u660e',
+                ))
 
     def publish(self):
         if self.publish_lock is None:
@@ -1175,6 +1181,7 @@ class ShopFollowupCase:
                 'functions_total': len(self.functions),
                 'form_values': self.form_values,
                 'publish_response': self.publish_response,
+                'server_warnings': self.server_warnings,
                 'api_count': api_summary['count'],
                 'api_endpoints': api_summary['endpoints'],
                 'detail_dump': self.detail_dump_path,

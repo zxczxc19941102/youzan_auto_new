@@ -27,7 +27,11 @@ import json
 import subprocess
 
 # ---- 自动切换到项目 venv 的 python（保证 playwright/pillow/numpy 可用）----
-_HERE = os.path.dirname(os.path.abspath(__file__))
+_HERE = (
+    os.path.dirname(os.path.abspath(sys.executable))
+    if getattr(sys, 'frozen', False)
+    else os.path.dirname(os.path.abspath(__file__))
+)
 _RUNTIME_CONFIG_FILE = os.path.join(_HERE, 'project_config.json')
 _RUNTIME_DEFAULTS = {
     'venv_dir': '.venv',
@@ -63,13 +67,21 @@ _VENV_PY_REL = _project_relative_path(
 )
 _VENV = os.path.abspath(os.path.join(_HERE, _VENV_REL))
 _VENV_PY = os.path.abspath(os.path.join(_VENV, _VENV_PY_REL))
-if os.path.isdir(_VENV) and os.path.normcase(os.path.abspath(sys.prefix)) != os.path.normcase(os.path.abspath(_VENV)):
+if (
+    not getattr(sys, 'frozen', False)
+    and os.path.isdir(_VENV)
+    and os.path.normcase(os.path.abspath(sys.prefix)) != os.path.normcase(os.path.abspath(_VENV))
+):
     if not os.path.isfile(_VENV_PY):
         raise SystemExit(
             'Project virtual-environment interpreter is missing: %s; run setup.ps1 to create .venv' % _VENV_PY
         )
     raise SystemExit(subprocess.call([_VENV_PY, os.path.abspath(__file__)] + sys.argv[1:]))
-if os.path.abspath(sys.prefix) != _VENV and not os.path.isfile(_VENV_PY):
+if (
+    not getattr(sys, 'frozen', False)
+    and os.path.abspath(sys.prefix) != _VENV
+    and not os.path.isfile(_VENV_PY)
+):
     raise SystemExit(
         'Project .venv interpreter was not found: %s; run .\\setup.ps1 first' % _VENV_PY
     )
@@ -400,6 +412,8 @@ def _read_workers():
         value = int(worker_count_var.get()) if worker_count_var else config.DEFAULT_WORKERS
     except Exception:
         value = config.DEFAULT_WORKERS
+    if not config.FOLLOWUP_CONCURRENCY_ENABLED:
+        return 1
     return max(1, min(10, value))
 
 
@@ -646,7 +660,10 @@ def _auto_followup_after_login(bot_obj, settings):
         return {'success': False, 'count': len(shops), 'cancelled': True}
 
     dry_run = bool(settings.get('fill_all_dry', False))
-    workers = max(1, min(10, int(settings.get('workers', config.DEFAULT_WORKERS))))
+    requested_workers = max(1, min(10, int(settings.get('workers', config.DEFAULT_WORKERS))))
+    workers = requested_workers if config.FOLLOWUP_CONCURRENCY_ENABLED else 1
+    if requested_workers != workers:
+        log('\u68c0\u6d4b\u5230\u670d\u52a1\u5668\u5bf9\u8ddf\u8fdb\u5199\u5165\u6709\u9650\u5236\uff0c\u5df2\u5c06\u5e76\u53d1 %d \u5f3a\u5236\u964d\u4e3a\u5355\u7ebf\u7a0b' % requested_workers)
     fill_debug = _make_debug_log('fill_all')
     skip_done = not repeat_followup
     batch_done_ids = set() if repeat_followup else today_ids
@@ -853,7 +870,8 @@ def on_start():
     if login_running['v']:
         log('任务运行中，请先点【全部终止】')
         return
-    fresh_login_requested['v'] = False
+    # The Start Login button must validate the current credentials; only on_ck() may reuse local Cookie/CK.
+    fresh_login_requested['v'] = True
     code_event.clear()
     code_value['v'] = ''
     entry_code.delete(0, tk.END)
@@ -864,6 +882,7 @@ def on_start():
         _mask_account(user), read_elapsed
     ))
     settings = _read_ui_settings()
+    rt.emit('\u8d26\u53f7\u5bc6\u7801\u767b\u5f55\uff1a\u5f3a\u5236\u8d70\u5b9e\u9645\u51ed\u636e\u6821\u9a8c\uff0c\u4e0d\u4f7f\u7528\u672c\u5730\u514d\u5bc6\u767b\u5f55\u6001')
     rt.submit('\u8d26\u53f7 %s' % _mask_account(user), login_worker, user, pwd, settings)
 
 
@@ -973,7 +992,7 @@ def run_gui():
     ttk.Combobox(
         frm,
         textvariable=worker_count_var,
-        values=tuple(str(index) for index in range(1, 11)),
+        values=('1',),
         width=5,
         state='readonly',
     ).grid(row=5, column=2, sticky='w', padx=6)
@@ -1190,6 +1209,9 @@ if __name__ == '__main__':
     if '--workers' in sys.argv:
         try:
             _workers = max(1, int(sys.argv[sys.argv.index('--workers') + 1]))
+            if not config.FOLLOWUP_CONCURRENCY_ENABLED and _workers != 1:
+                log('\u670d\u52a1\u5668\u9650\u5236\uff1a\u5ffd\u7565 --workers=%d\uff0c\u4f7f\u7528\u5355\u7ebf\u7a0b' % _workers)
+                _workers = 1
         except Exception:
             _workers = 1
     if '--fill-all-dry' in sys.argv:

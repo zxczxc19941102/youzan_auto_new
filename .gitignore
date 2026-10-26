@@ -19,3 +19,8 @@ html/
 txt/
 png/
 LOG/
+
+# Build output
+build/
+dist/
+*.spec

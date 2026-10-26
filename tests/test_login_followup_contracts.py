@@ -1,14 +1,17 @@
 # -*- coding: utf-8 -*-
 """Offline regression checks for login, proxy, and concise follow-up logging."""
 import sys
+import json
 import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / 'py'))
+sys.path.insert(0, str(ROOT))
+sys.path.insert(1, str(ROOT / 'py'))
 
+import main as app_main  # noqa: E402
 import followup_batch  # noqa: E402
 from shop_list_reader import ShopListReader  # noqa: E402
 from shop_followup import ShopFollowupCase  # noqa: E402
@@ -169,31 +172,93 @@ class RegressionTests:
         assert messages == ['\u70b9\u51fb\uff1a\u5e97\u94fa--\u6211\u7684\u5e97\u94fa']
 
     @staticmethod
-    def seven_worker_parallel_submission_uses_valid_worker_signature():
-        """Regression: seven preallocated chunks must execute, not fail in submit()."""
-        from concurrent.futures import ThreadPoolExecutor
-        import time
+    def start_login_forces_real_credential_validation():
+        class FakeBot:
+            def __init__(self, *_args, **_kwargs):
+                self.start_login_called = False
+                self.load_cookie_called = False
 
-        batch = followup_batch.FollowupBatch.__new__(followup_batch.FollowupBatch)
-        batch.executor = ThreadPoolExecutor(max_workers=7)
-        batch.debug = lambda _message: None
-        seen = []
+            def bind_runtime(self, _runtime):
+                pass
 
-        def fake_worker(chunk):
-            time.sleep(0.01)
-            seen.append(tuple(index for index, _shop in chunk))
+            def load_cookies_and_go(self):
+                self.load_cookie_called = True
+                raise AssertionError('password login must not use local cookies')
 
-        batch._worker = fake_worker
-        targets = [{'shop_id': str(index)} for index in range(30)]
+            def start_login(self, _user, _password):
+                self.start_login_called = True
+                return False
+
+            def close(self):
+                pass
+
+        fake_bot = FakeBot()
+        old_flag = app_main.fresh_login_requested['v']
         try:
-            batch._run_parallel(targets, 7)
+            app_main.fresh_login_requested['v'] = True
+            with patch.object(app_main, 'YouzanBot', return_value=fake_bot), \
+                 patch.object(app_main, '_ck_token_exist', return_value=True), \
+                 patch.object(app_main, '_make_debug_log', return_value=lambda _message: None), \
+                 patch.object(app_main, 'log'), \
+                 patch.object(app_main, '_auto_followup_after_login'):
+                result = app_main.login_worker('user', 'wrong-password', {'proxy_server': ''})
+            assert result is False
+            assert fake_bot.start_login_called is True
+            assert fake_bot.load_cookie_called is False
         finally:
-            batch.executor.shutdown(wait=True)
+            app_main.fresh_login_requested['v'] = old_flag
 
-        processed = [index for chunk in seen for index in chunk]
-        assert sorted(processed) == list(range(1, 31))
-        assert len(seen) == 7
-        assert sorted(len(chunk) for chunk in seen) == [4, 4, 4, 4, 4, 5, 5]
+    @staticmethod
+    def followup_server_warning_is_recorded_without_hiding_success():
+        messages = []
+        case = ShopFollowupCase.__new__(ShopFollowupCase)
+        case.log = messages.append
+        case.server_warnings = []
+        case._log_publish_detail({
+            'response': json.dumps({
+                'code': 0,
+                'data': {
+                    'visitRecordId': 123,
+                    'visitReturnCodes': [
+                        {'code': 4, 'message': '\u64cd\u4f5c\u592a\u5feb\uff0c\u53ef\u80fd\u4f1a\u51fa\u9519\u5662'},
+                        {'code': 0, 'message': '\u6210\u529f\u6dfb\u52a0\u62dc\u8bbf'},
+                    ],
+                },
+            }, ensure_ascii=False),
+        })
+        assert case.server_warnings == [{
+            'code': '4', 'message': '\u64cd\u4f5c\u592a\u5feb\uff0c\u53ef\u80fd\u4f1a\u51fa\u9519\u5662',
+        }]
+        assert any('\u670d\u52a1\u5668\u4e1a\u52a1\u63d0\u793a' in message for message in messages)
+
+    @staticmethod
+    def disabled_concurrency_forces_sequential_batch_execution():
+        calls = []
+        debug_messages = []
+        batch = followup_batch.FollowupBatch.__new__(followup_batch.FollowupBatch)
+        batch.executor = None
+        batch.runtime = None
+        batch.abort_event = threading.Event()
+        batch.stop_event = threading.Event()
+        batch.results = []
+        batch.debug = debug_messages.append
+        batch.raw = lambda _message: None
+        batch._check = lambda: None
+        batch._pace = lambda: None
+        batch._note = lambda _message: None
+        batch._fill_one = lambda shop, position: calls.append((shop['shop_id'], position)) or True
+        batch._summary = lambda: (2, 2, 0, 0)
+        batch._save_report = lambda *_args: None
+        result = batch.run(
+            all_shops=True,
+            workers=7,
+            skip_done=False,
+            shops=[{'shop_id': 'a'}, {'shop_id': 'b'}],
+            announce_count=False,
+        )
+        assert result == {'attempted': 2, 'success': 2, 'failed': 0, 'cancelled': 0, 'server_warnings': 0}
+        assert calls == [('a', 1), ('b', 2)]
+        assert any('\u56fa\u5b9a\u5355\u7ebf\u7a0b' in message for message in debug_messages)
 
     @staticmethod
     def followup_toggle_waits_for_async_panel_and_clicks_dynamic_class():
@@ -283,8 +348,12 @@ def main():
          RegressionTests.only_confirmed_workbench_is_success),
         ('actual shop-menu navigation',
          RegressionTests.my_shops_navigation_is_a_real_click),
-        ('seven-worker parallel submission',
-         RegressionTests.seven_worker_parallel_submission_uses_valid_worker_signature),
+        ('real credential validation',
+         RegressionTests.start_login_forces_real_credential_validation),
+        ('server warning recording',
+         RegressionTests.followup_server_warning_is_recorded_without_hiding_success),
+        ('disabled concurrency sequential batch',
+         RegressionTests.disabled_concurrency_forces_sequential_batch_execution),
         ('async follow-up panel toggle',
          RegressionTests.followup_toggle_waits_for_async_panel_and_clicks_dynamic_class),
         ('parallel follow-up log content',

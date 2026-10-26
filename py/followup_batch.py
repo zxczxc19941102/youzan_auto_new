@@ -7,8 +7,6 @@ import random
 import re
 import threading
 import time
-from concurrent.futures import Future
-from concurrent.futures import wait as wait_futures
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -218,6 +216,7 @@ class FollowupBatch:
                 self._record_result(
                     shop, detail_url, False, '已终止',
                     result.get('steps', []), cancelled=True,
+                    warnings=result.get('server_warnings', []),
                 )
                 raise
             except Exception as exc:
@@ -229,11 +228,14 @@ class FollowupBatch:
                     pass
 
         steps = result.get('steps', [])
-        self._record_result(shop, detail_url, success, error, steps)
+        self._record_result(
+            shop, detail_url, success, error, steps,
+            warnings=result.get('server_warnings', []),
+        )
         return success
 
     def _record_result(self, shop, detail_url, success, error, steps,
-                       cancelled=False):
+                       cancelled=False, warnings=None):
         with self._print_lock:
             if not success:
                 self._emit_steps(steps)
@@ -244,6 +246,7 @@ class FollowupBatch:
                 'success': success,
                 'cancelled': bool(cancelled),
                 'error': error,
+                'server_warnings': list(warnings or []),
                 'steps': steps,
             })
 
@@ -403,12 +406,14 @@ class FollowupBatch:
             self._record_result(
                 shop, detail_url, False, '已终止',
                 result.get('steps', []), cancelled=True,
+                warnings=result.get('server_warnings', []),
             )
             raise
         except Exception as exc:
             error = repr(exc)
         self._record_result(
-            shop, detail_url, success, error, result.get('steps', [])
+            shop, detail_url, success, error, result.get('steps', []),
+            warnings=result.get('server_warnings', []),
         )
         return success
 
@@ -469,58 +474,6 @@ class FollowupBatch:
             if runtime is not None:
                 runtime.end_task(label, status, started, emit=True)
 
-    @staticmethod
-    def _partition_targets(targets, workers):
-        """Preallocate contiguous chunks; earlier workers receive one extra item."""
-        indexed = list(enumerate(targets, 1))
-        workers = max(1, min(int(workers), len(indexed) or 1))
-        base, remainder = divmod(len(indexed), workers)
-        chunks = []
-        cursor = 0
-        for worker_number in range(workers):
-            size = base + (1 if worker_number < remainder else 0)
-            chunks.append(indexed[cursor:cursor + size])
-            cursor += size
-        return chunks
-
-
-    def _run_parallel(self, targets, workers):
-        """把店铺切片提交到受控线程池，池容量严格等于下拉框选定的并发数。"""
-        workers = max(1, min(workers, len(targets)))
-        self.debug('并发填写：%d 家，%d 线程' % (len(targets), workers))
-        chunks = self._partition_targets(targets, workers)
-        own_pool = None
-        pool = self.executor
-        if pool is None:
-            from concurrent.futures import ThreadPoolExecutor
-            own_pool = ThreadPoolExecutor(
-                max_workers=workers, thread_name_prefix='YouzanBatch'
-            )
-            pool = own_pool
-        # _worker 只接收一个预分配的 chunk；此前额外传入 worker_number，
-        # 会让每个 Future 在启动前都抛出 TypeError，最终表现为“成功0/失败0”。
-        # worker 编号并不参与业务处理，直接提交 chunk 即可。
-        tasks: list[Future] = [
-            pool.submit(self._worker, chunk)
-            for chunk in chunks
-        ]
-        try:
-            # 阻塞等待而非轮询；工作线程靠停止事件在检查点自行退出
-            wait_futures(tasks)
-        finally:
-            if own_pool is not None:
-                own_pool.shutdown(wait=False, cancel_futures=True)
-        for task in tasks:
-            if task.cancelled():
-                continue
-            try:
-                task.result()
-            except TaskCancelled:
-                continue
-            except Exception as exc:
-                self.debug('并发任务异常：%r' % exc)
-                self.abort_event.set()
-
     def run(
         self,
         count=3,
@@ -536,6 +489,12 @@ class FollowupBatch:
         if executor is not None:
             self.executor = executor
         self.abort_event.clear()
+        requested_workers = max(1, int(workers or 1))
+        if not config.FOLLOWUP_CONCURRENCY_ENABLED and requested_workers != 1:
+            self.debug('\u670d\u52a1\u5668\u9650\u5236\uff1a\u8ddf\u8fdb\u5199\u5165\u56fa\u5b9a\u5355\u7ebf\u7a0b\uff08\u5ffd\u7565 workers=%d\uff09' % requested_workers)
+            workers = 1
+        else:
+            workers = requested_workers
         if shops is None:
             shops = self.load_all_shops() if all_shops else self.load_first_page()
         if announce_count:
@@ -563,27 +522,32 @@ class FollowupBatch:
             self.raw('填写 0 条记录已完成，填写成功 0 条，失败 0 条，终止 0 条。')
             return {
                 'attempted': 0, 'success': 0, 'failed': 0, 'cancelled': 0,
+                'server_warnings': 0,
             }
 
         self.total_targets = len(targets)
-        if workers > 1 and len(targets) > 1:
-            self._run_parallel(targets, workers)
-        else:
-            for position, shop in enumerate(targets, 1):
-                self._check()
-                self._note('开始填写第 %d/%d 家店铺' % (
-                    position, len(targets)
-                ))
-                ok = self._fill_one(shop, position)
-                if not ok:
-                    self.debug('第 %d 家未成功，继续下一家' % position)
-                self._pace()
+        # Follow-up writes are rate-limited by the server; process shops sequentially.
+        for position, shop in enumerate(targets, 1):
+            self._check()
+            self._note('\u5f00\u59cb\u586b\u5199\u7b2c %d/%d \u5bb6\u5e97\u94fa' % (
+                position, len(targets)
+            ))
+            ok = self._fill_one(shop, position)
+            if not ok:
+                self.debug('\u7b2c %d \u5bb6\u672a\u6210\u529f\uff0c\u7ee7\u7eed\u4e0b\u4e00\u5bb6' % position)
+            self._pace()
 
         attempted, success, failed, cancelled = self._summary()
+        warning_count = sum(
+            len(item.get('server_warnings') or []) for item in self.results
+        )
+        if warning_count:
+            self.debug('\u670d\u52a1\u5668\u4e1a\u52a1\u63d0\u793a\uff1a%d \u6761\uff08\u8bb0\u5f55\u5df2\u5199\u5165\uff0c\u672a\u5224\u5b9a\u4e3a\u5931\u8d25\uff09' % warning_count)
         self._save_report(attempted, success, failed, cancelled)
         return {
             'attempted': attempted,
             'success': success,
             'failed': failed,
             'cancelled': cancelled,
+            'server_warnings': warning_count,
         }

@@ -6,10 +6,15 @@ import json
 import os
 import tempfile
 import time
+import sys
 from ctypes import wintypes
 
 # 目录（config.py 在 py/ 下，项目根目录是它的上一级）
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = (
+    os.path.dirname(os.path.abspath(sys.executable))
+    if getattr(sys, 'frozen', False)
+    else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 PROJECT_CONFIG_FILE = os.path.join(BASE_DIR, 'project_config.json')
 PY_DIR = os.path.join(BASE_DIR, 'py')
 JSON_DIR = os.path.join(BASE_DIR, 'json')
@@ -135,14 +140,15 @@ DEFAULT_PWD = _PASSWORD_FROM_ENV or _unprotect_password(_LOCAL_PASSWORD_VALUE)
 DEFAULT_AUTO_SHOP_LIST = _as_bool(_LOCAL_CONFIG.get('auto_shop_list'), True)
 DEFAULT_AUTO_FILL_ALL = _as_bool(_LOCAL_CONFIG.get('auto_fill_all'), True)
 DEFAULT_FILL_ALL_DRY = _as_bool(_LOCAL_CONFIG.get('fill_all_dry'), False)
+FOLLOWUP_CONCURRENCY_ENABLED = False  # server warns on concurrent visit/save writes
 DEFAULT_PROXY_SERVER = (
     os.environ.get('YOUZAN_PROXY_SERVER')
     or str(_LOCAL_CONFIG.get('proxy_server') or 'http://127.0.0.1:10808').strip()
 )
 try:
-    DEFAULT_WORKERS = max(1, min(10, int(_LOCAL_CONFIG.get('workers', 3))))
+    DEFAULT_WORKERS = 1 if not FOLLOWUP_CONCURRENCY_ENABLED else max(1, min(10, int(_LOCAL_CONFIG.get('workers', 3))))
 except (TypeError, ValueError):
-    DEFAULT_WORKERS = 3
+    DEFAULT_WORKERS = 1
 
 
 def save_local_config(username, password, auto_shop_list=True,
@@ -156,7 +162,7 @@ def save_local_config(username, password, auto_shop_list=True,
         'auto_shop_list': bool(auto_shop_list),
         'auto_fill_all': bool(auto_fill_all),
         'fill_all_dry': bool(fill_all_dry),
-        'workers': max(1, min(10, int(workers))),
+        'workers': 1 if not FOLLOWUP_CONCURRENCY_ENABLED else max(1, min(10, int(workers))),
         'proxy_server': str(proxy_server or DEFAULT_PROXY_SERVER).strip(),
     }
     fd, temp_path = tempfile.mkstemp(
