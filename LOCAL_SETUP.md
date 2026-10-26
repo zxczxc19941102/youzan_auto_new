@@ -1,93 +1,33 @@
-<<<<<<< HEAD
-﻿# 本地运行环境
+﻿# Local setup notes
 
-## 一键初始化
+This file contains local setup guidance only. It must not contain real account numbers, passwords, cookies, access tokens or screenshots with sensitive data.
 
-在项目根目录打开 PowerShell，执行：
-
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\setup.ps1
-```
-
-脚本会创建 `.venv`、安装 `requirements.txt` 中的依赖，并检查 Python 模块和 Microsoft Edge。`.venv/` 属于本机运行环境，已被 `.gitignore` 排除，不需要提交到仓库。
-
-## 启动
-
-```powershell
-.\run.cmd                 # 启动图形界面
-.\run.cmd --smoke         # 无头冒烟检查
-.\run.cmd --fill-first3-dry # 前 3 家试运行，不发布
-```
-
-也可以直接运行：
-
-```powershell
-.\.venv\Scripts\python.exe .\main.py
-```
-
-账号密码建议使用环境变量，不要写入代码或提交到 Git：
-
-```powershell
-$env:YOUZAN_USER = '你的账号'
-$env:YOUZAN_PASSWORD = '你的密码'
-.\run.cmd
-```
-## ????
-
-???????????????? `json/local_config.json`?
-
-- ??
-- Windows ???? DPAPI ??????
-- ?????
-- ?????
-
-?????? `.gitignore`???? Git ??????????????????????????????
-
-=======
-﻿# 本地运行环境
-
-## 一键初始化
-
-在项目根目录打开 PowerShell，执行：
+## Setup
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\setup.ps1
-```
-
-脚本会创建 `.venv`、安装 `requirements.txt` 中的依赖，并检查 Python 模块和 Microsoft Edge。`.venv/` 属于本机运行环境，已被 `.gitignore` 排除，不需要提交到仓库。
-
-## 启动
-
-```powershell
-.\run.cmd                 # 启动图形界面
-.\run.cmd --smoke         # 无头冒烟检查
-.\run.cmd --fill-first3-dry # 前 3 家试运行，不发布
-```
-
-也可以直接运行：
-
-```powershell
-.\.venv\Scripts\python.exe .\main.py
-```
-
-账号密码建议使用环境变量，不要写入代码或提交到 Git：
-
-```powershell
-$env:YOUZAN_USER = '你的账号'
-$env:YOUZAN_PASSWORD = '你的密码'
 .\run.cmd
 ```
-## ????
 
-???????????????? `json/local_config.json`?
+The setup script creates `.venv` and installs the dependencies from `requirements.txt`.
 
-- ??
-- Windows ???? DPAPI ??????
-- ?????
-- ?????
+## Credentials
 
-?????? `.gitignore`???? Git ??????????????????????????????
+Enter credentials in the GUI or provide placeholder-free values through environment variables in the current PowerShell session:
 
->>>>>>> b94e3e2 (修复Python 3.14登录并持久化本地配置)
+```powershell
+$env:YOUZAN_USER = 'your-account'
+$env:YOUZAN_PASSWORD = 'your-password'
+```
+
+Do not paste real values into source files, README files or Git commits. The application stores local password data using Windows DPAPI and ignores local runtime files through `.gitignore`.
+
+## Build
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r .\requirements-build.txt
+.\build-exe.ps1 -UpxPath 'D:\TOOLS\upx.exe'
+```
+
+The generated EXE is local build output and is not committed to GitHub.
