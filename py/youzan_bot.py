@@ -347,7 +347,7 @@ class YouzanBot:
                 label='打开工作台',
             )
             ready = self._wait_workbench_ready()
-            self.sleep(1.0)
+            self.sleep(config.WORKBENCH_SETTLE_SECONDS)
             # 工作台可能先渲染、随后才弹出“账号已在其他PC登录”遮罩，这里再确认一次
             if ready and not self._is_logged_in():
                 ready = False
@@ -447,14 +447,18 @@ class YouzanBot:
                     ),
                     label='打开登录页',
                 )
-                self.sleep(1.5)
+                self.sleep(config.LOGIN_PAGE_SETTLE_SECONDS)
                 page.evaluate(
                     "() => { const s=document.querySelector('.js-tab-password-login'); if(s) s.click(); }"
                 )
-                self.sleep(0.5)
-                page.get_by_text('密码登录', exact=True).click()
-                self.sleep(0.5)
-                outcome['value'] = '密码登录页已切换'
+                password_tab = page.get_by_text('\u5bc6\u7801\u767b\u5f55', exact=True)
+                if password_tab.count():
+                    try:
+                        password_tab.click(timeout=2000, no_wait_after=True)
+                    except Exception:
+                        pass
+                outcome['value'] = '\u5bc6\u7801\u767b\u5f55\u9875\u5df2\u5207\u6362'
+
 
             self.progress('\u8d26\u53f7\u5bc6\u7801\u8f93\u5165\u4e2d')
             with self.step(
@@ -494,7 +498,7 @@ class YouzanBot:
             phone = False
             logged_in = False
             conflict = False
-            for _ in range(12):
+            for _ in range(24):
                 self.check_stop()
                 try:
                     conflict = self._has_session_conflict()
@@ -509,7 +513,7 @@ class YouzanBot:
                 except Exception as exc:
                     if not self._is_navigation_transition_error(exc):
                         raise
-                self.sleep(0.5)
+                self.sleep(config.LOGIN_STATE_POLL_SECONDS)
 
             if conflict:
                 self.log('检测到「账号已在其他PC登录」，结束旧会话并重新登录')
@@ -579,12 +583,40 @@ class YouzanBot:
                         self.log('等待滑块超时：%r' % exc)
                         outcome['value'] = '滑块未出现（等待超时）'
                     return False
-                self.sleep(1.0)
-                info = page.evaluate(JS_GET_IMAGES)
-                if info.get('err'):
-                    raise RuntimeError('读取拼图失败: ' + info['err'])
-                bg = base64.b64decode(info['bigB64'])
-                sl = base64.b64decode(info['smallB64'])
+                # Let the captcha image request settle before reading it.
+                self.sleep(config.CAPTCHA_IMAGE_SETTLE_SECONDS)
+                deadline = time.monotonic() + config.CAPTCHA_IMAGE_READY_TIMEOUT_SECONDS
+                info = None
+                bg = sl = None
+                last_image_error = None
+                while time.monotonic() < deadline:
+                    self.check_stop()
+                    try:
+                        candidate = page.evaluate(JS_GET_IMAGES)
+                        if candidate.get('err'):
+                            raise RuntimeError(candidate['err'])
+                        candidate_bg = base64.b64decode(
+                            candidate['bigB64'], validate=True
+                        )
+                        candidate_sl = base64.b64decode(
+                            candidate['smallB64'], validate=True
+                        )
+                        # Validate both payloads before recognition.
+                        with Image.open(io.BytesIO(candidate_bg)) as image:
+                            image.verify()
+                        with Image.open(io.BytesIO(candidate_sl)) as image:
+                            image.verify()
+                        info = candidate
+                        bg, sl = candidate_bg, candidate_sl
+                        break
+                    except Exception as exc:
+                        last_image_error = exc
+                        self.sleep(config.CAPTCHA_IMAGE_POLL_SECONDS)
+                if info is None:
+                    raise RuntimeError(
+                        'captcha images were not ready before timeout: %s'
+                        % last_image_error
+                    )
                 outcome['value'] = '背景图 %d 字节，拼图 %d 字节' % (len(bg), len(sl))
 
             with self.step(
@@ -603,23 +635,24 @@ class YouzanBot:
                 human_drag(page, dist, info['handleCx'], info['handleCy'])
                 outcome['value'] = '已拖动 %.1fpx' % dist
 
-            self.sleep(3.2)
-            with self.step('滑块结果校验', '检查验证码容器是否消失') as outcome:
+            with self.step('\u6ed1\u5757\u7ed3\u679c\u6821\u9a8c', '\u68c0\u67e5\u9a8c\u8bc1\u7801\u5bb9\u5668\u662f\u5426\u6d88\u5931') as outcome:
                 still = True
-                for _ in range(8):
+                deadline = time.monotonic() + config.CAPTCHA_RESULT_TIMEOUT_SECONDS
+                while time.monotonic() < deadline:
                     self.check_stop()
                     try:
                         still = page.evaluate(
                             "() => [...document.querySelectorAll('.slide-captcha-container')].some(el => el.getBoundingClientRect().width > 0)"
                         )
-                        break
+                        if not still:
+                            break
                     except TaskCancelled:
                         raise
                     except Exception as exc:
                         if not self._is_navigation_transition_error(exc):
                             raise
-                        self.sleep(0.25)
-                outcome['value'] = '容器仍在（未通过）' if still else '容器已消失（通过）'
+                    self.sleep(config.CAPTCHA_RESULT_POLL_SECONDS)
+                outcome['value'] = '\u5bb9\u5668\u4ecd\u5728\uff08\u672a\u901a\u8fc7\uff09' if still else '\u5bb9\u5668\u5df2\u6d88\u5931\uff08\u901a\u8fc7\uff09'
             if not still:
                 self.log('验证完成')
                 return True

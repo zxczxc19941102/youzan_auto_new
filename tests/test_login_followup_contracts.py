@@ -3,6 +3,7 @@
 import sys
 import json
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -12,6 +13,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(1, str(ROOT / 'py'))
 
 import main as app_main  # noqa: E402
+import config  # noqa: E402
 import followup_batch  # noqa: E402
 from shop_list_reader import ShopListReader  # noqa: E402
 from shop_followup import ShopFollowupCase  # noqa: E402
@@ -229,10 +231,31 @@ class RegressionTests:
         assert case.server_warnings == [{
             'code': '4', 'message': '\u64cd\u4f5c\u592a\u5feb\uff0c\u53ef\u80fd\u4f1a\u51fa\u9519\u5662',
         }]
-        assert any('\u670d\u52a1\u5668\u4e1a\u52a1\u63d0\u793a' in message for message in messages)
+        assert any('原始错误码=4' in message for message in messages)
 
     @staticmethod
-    def disabled_concurrency_forces_sequential_batch_execution():
+    def root_server_error_is_preserved_verbatim():
+        messages = []
+        case = ShopFollowupCase.__new__(ShopFollowupCase)
+        case.log = messages.append
+        case.server_warnings = []
+        case._log_publish_detail({
+            'status': 429,
+            'resp_code': '429001',
+            'response': json.dumps({
+                'code': '429001',
+                'message': 'rate limit from server',
+            }),
+        })
+        assert case.server_warnings == [{
+            'code': '429001', 'message': 'rate limit from server',
+        }]
+        assert len(messages) == 1
+        assert '429001' in messages[0]
+        assert 'rate limit from server' in messages[0]
+
+    @staticmethod
+    def single_thread_keeps_sequential_batch_execution():
         calls = []
         debug_messages = []
         batch = followup_batch.FollowupBatch.__new__(followup_batch.FollowupBatch)
@@ -251,14 +274,95 @@ class RegressionTests:
         batch._save_report = lambda *_args: None
         result = batch.run(
             all_shops=True,
-            workers=7,
+            workers=1,
             skip_done=False,
             shops=[{'shop_id': 'a'}, {'shop_id': 'b'}],
             announce_count=False,
         )
         assert result == {'attempted': 2, 'success': 2, 'failed': 0, 'cancelled': 0, 'server_warnings': 0}
         assert calls == [('a', 1), ('b', 2)]
-        assert any('\u56fa\u5b9a\u5355\u7ebf\u7a0b' in message for message in debug_messages)
+
+    @staticmethod
+    def partition_and_single_thread_enforcement():
+        targets = [{'shop_id': str(index)} for index in range(30)]
+        expected_sizes = {2: [15, 15], 3: [10, 10, 10], 4: [8, 8, 7, 7]}
+        for workers, sizes in expected_sizes.items():
+            chunks = followup_batch.FollowupBatch._partition_targets(
+                targets, workers
+            )
+            assert [len(chunk) for chunk in chunks] == sizes
+            flattened = [shop['shop_id'] for chunk in chunks for _, shop in chunk]
+            assert flattened == [shop['shop_id'] for shop in targets]
+
+        calls = []
+        batch = followup_batch.FollowupBatch.__new__(followup_batch.FollowupBatch)
+        batch.executor = None
+        batch.runtime = None
+        batch.abort_event = threading.Event()
+        batch.stop_event = threading.Event()
+        batch.results = []
+        batch.raw = lambda _message: None
+        batch.debug = lambda _message: None
+        batch._note = lambda _message: None
+        batch._check = lambda: None
+        batch._pace = lambda: None
+        batch._fill_one = lambda shop, position: calls.append((shop['shop_id'], position)) or True
+        batch._summary = lambda: (30, 30, 0, 0)
+        batch._save_report = lambda *_args: None
+
+        with patch.object(config, 'FOLLOWUP_CONCURRENCY_ENABLED', True), \
+             patch.object(config, 'FOLLOWUP_MAX_WORKERS', 4):
+            result = batch.run(
+                all_shops=True,
+                workers=7,
+                skip_done=False,
+                shops=targets,
+                announce_count=False,
+            )
+        assert result['attempted'] == 30
+        assert calls == [(str(index), index + 1) for index in range(30)]
+
+    @staticmethod
+    def followup_logs_use_batch_progress_without_start_noise():
+        messages = []
+
+        class FakeRuntime:
+            def emit_progress(self, message, current, total, **_kwargs):
+                messages.append((message, current, total))
+
+        batch = followup_batch.FollowupBatch.__new__(followup_batch.FollowupBatch)
+        batch.runtime = FakeRuntime()
+        batch.raw = messages.append
+        batch.total_targets = 30
+        batch.progress_position = 1
+        batch._note('成功 条目店铺ID=40785558')
+        batch.progress_position = 2
+        batch._note('成功 条目店铺ID=44588156')
+
+        assert messages == [
+            ('成功 条目店铺ID=40785558', 1, 30),
+            ('成功 条目店铺ID=44588156', 2, 30),
+        ]
+
+    @staticmethod
+    def default_batch_uses_fixed_publish_interval():
+        batch = followup_batch.FollowupBatch(
+            SimpleNamespace(page=object()),
+            lambda _message: None,
+            lambda *_args: None,
+            lambda _message: None,
+            dry_run=False,
+        )
+        assert batch.publish_gate is not None
+        assert batch.publish_gate.interval_seconds == 3.01
+        dry_batch = followup_batch.FollowupBatch(
+            SimpleNamespace(page=object()),
+            lambda _message: None,
+            lambda *_args: None,
+            lambda _message: None,
+            dry_run=True,
+        )
+        assert dry_batch.publish_gate is None
 
     @staticmethod
     def followup_toggle_waits_for_async_panel_and_clicks_dynamic_class():
@@ -336,7 +440,7 @@ class RegressionTests:
         assert text.count('\u8ddf\u8fdb\u5185\u5bb9\uff1a') == 1
         assert '\u5fae\u4fe1' in text and '\u540e\u7eed\u56de\u8bbf' in text
         assert 'PRIVATE_SHOP_NAME' not in text
-        assert 'PRIVATE_SHOP_ID' not in text
+        assert 'PRIVATE_SHOP_ID' in text
 
 
 def main():
@@ -352,8 +456,16 @@ def main():
          RegressionTests.start_login_forces_real_credential_validation),
         ('server warning recording',
          RegressionTests.followup_server_warning_is_recorded_without_hiding_success),
-        ('disabled concurrency sequential batch',
-         RegressionTests.disabled_concurrency_forces_sequential_batch_execution),
+        ('root server error preserved',
+         RegressionTests.root_server_error_is_preserved_verbatim),
+        ('single-thread sequential batch',
+         RegressionTests.single_thread_keeps_sequential_batch_execution),
+        ('partition and fixed single-thread batch',
+         RegressionTests.partition_and_single_thread_enforcement),
+        ('follow-up log progress without start noise',
+         RegressionTests.followup_logs_use_batch_progress_without_start_noise),
+        ('fixed publish interval',
+         RegressionTests.default_batch_uses_fixed_publish_interval),
         ('async follow-up panel toggle',
          RegressionTests.followup_toggle_waits_for_async_panel_and_clicks_dynamic_class),
         ('parallel follow-up log content',
@@ -374,4 +486,3 @@ def main():
 
 if __name__ == '__main__':
     raise SystemExit(main())
-

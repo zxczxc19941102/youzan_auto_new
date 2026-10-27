@@ -12,15 +12,16 @@ from types import SimpleNamespace
 
 import config
 from shop_followup import ShopFollowupCase
+from followup_pressure import PublishIntervalGate
 from shop_list_reader import SEPARATOR, SHOP_LIST_URL, ShopListReader
-from task_runtime import TaskCancelled
+from task_runtime import DaemonThreadPoolExecutor, TaskCancelled
 from youzan_bot import YouzanBot
 
 
 class FollowupBatch:
     def __init__(
         self, bot, raw_log, styled_log, debug_log, dry_run=False,
-        runtime=None, executor=None, publish_lock=None,
+        runtime=None, executor=None, publish_lock=None, publish_gate=None,
     ):
         self.bot = bot
         self.page = bot.page
@@ -29,23 +30,58 @@ class FollowupBatch:
         self.debug = debug_log
         self.dry_run = dry_run
         self.runtime = runtime
-        # 并发上限由 GUI 下拉框决定；有 runtime 时复用它的受控线程池
-        self.executor = executor or (runtime.executor if runtime else None)
+        # The login worker and the follow-up workers must use different pools.
+        # Reusing runtime.executor here would let a worker submit work to the
+        # same pool it occupies and can deadlock when the pool is full.
+        self.executor = executor
         self.stop_event = (
             runtime.stop_event if runtime is not None else threading.Event()
         )
         self.abort_event = threading.Event()   # 批次内失败快速停止，不混同全局取消
-        # Same-account writes are serialized by the server; keep reads and
-        # form filling concurrent, but protect the publish critical section.
+        # The product is intentionally single-threaded: one account fills and
+        # publishes one follow-up record at a time.
         self.publish_lock = publish_lock
+        # Normal publishing uses one shared gate so adjacent publish clicks
+        # are separated by the configured minimum interval.  Dry-run mode
+        # must remain fast and does not click the publish button.
+        if publish_gate is not None:
+            self.publish_gate = publish_gate
+        elif not dry_run:
+            self.publish_gate = PublishIntervalGate(
+                config.FOLLOWUP_PUBLISH_INTERVAL_SECONDS
+            )
+        else:
+            self.publish_gate = None
         self.run_id = time.strftime('%Y%m%d_%H%M%S')
         self.reader = ShopListReader(
             bot, lambda message: None, debug=debug_log, runtime=runtime
         )
         self.results = []
         self.total_targets = 0
+        self.progress_position = 0
         self._print_lock = threading.Lock()
         self._content_logged = False
+
+    @staticmethod
+    def _partition_targets(targets, workers):
+        """Pre-split targets into ordered, non-overlapping worker chunks.
+
+        The first ``remainder`` chunks receive one extra item.  Therefore 30
+        targets become 15/15, 10/10/10, and 8/8/7/7 for 2/3/4 workers.
+        Each item keeps its original 1-based position for deterministic logs.
+        """
+        indexed = list(enumerate(targets, 1))
+        if not indexed:
+            return []
+        worker_count = max(1, min(int(workers or 1), len(indexed)))
+        base, remainder = divmod(len(indexed), worker_count)
+        chunks = []
+        cursor = 0
+        for chunk_index in range(worker_count):
+            size = base + (1 if chunk_index < remainder else 0)
+            chunks.append(indexed[cursor:cursor + size])
+            cursor += size
+        return chunks
 
     def _halted(self):
         return self.abort_event.is_set() or self.stop_event.is_set()
@@ -64,9 +100,17 @@ class FollowupBatch:
             raise TaskCancelled()
 
     def _note(self, message):
-        """进度明细：有运行时走统一日志，否则用原始输出。"""
+        """Emit follow-up progress using current/total batch position."""
         if self.runtime is not None:
-            self.runtime.emit(message)
+            emit_progress = getattr(self.runtime, 'emit_progress', None)
+            if callable(emit_progress) and self.total_targets:
+                emit_progress(
+                    message,
+                    self.progress_position,
+                    self.total_targets,
+                )
+            else:
+                self.runtime.emit(message)
         else:
             self.raw(message)
 
@@ -207,6 +251,7 @@ class FollowupBatch:
                     run_id='%s_%02d' % (self.run_id, index),
                     runtime=self.runtime,
                     publish_lock=self.publish_lock,
+                    publish_gate=getattr(self, 'publish_gate', None),
                 )
                 result = case.run()
                 self._emit_followup_content(case.form_values)
@@ -236,17 +281,33 @@ class FollowupBatch:
 
     def _record_result(self, shop, detail_url, success, error, steps,
                        cancelled=False, warnings=None):
+        warnings = list(warnings or [])
+        shop_id = shop.get('kdt_id') or shop.get('shop_id') or ''
+        note = getattr(self, '_note', self.raw)
         with self._print_lock:
             if not success:
                 self._emit_steps(steps)
+            if warnings:
+                for warning in warnings:
+                    note('\u9519\u8bef \u6761\u76ee\u5e97\u94faID=%s \u539f\u59cb\u9519\u8bef\u7801=%s \u539f\u59cb\u9519\u8bef\u8bf4\u660e=%s' % (
+                        shop_id or '-',
+                        warning.get('code', ''),
+                        warning.get('message', ''),
+                    ))
+            if success:
+                note('\u6210\u529f \u6761\u76ee\u5e97\u94faID=%s' % (shop_id or '-'))
+            elif not warnings:
+                note('\u9519\u8bef \u6761\u76ee\u5e97\u94faID=%s \u5f02\u5e38=%s' % (
+                    shop_id or '-', error or '\u672a\u63d0\u4f9b\u9519\u8bef\u8bf4\u660e',
+                ))
             self.results.append({
                 'shop_name': shop.get('shop_name') or '',
-                'shop_id': shop.get('kdt_id') or shop.get('shop_id') or '',
+                'shop_id': shop_id,
                 'detail_url': detail_url,
                 'success': success,
                 'cancelled': bool(cancelled),
                 'error': error,
-                'server_warnings': list(warnings or []),
+                'server_warnings': warnings,
                 'steps': steps,
             })
 
@@ -397,6 +458,7 @@ class FollowupBatch:
                 run_id='%s_%02d' % (self.run_id, index),
                 runtime=self.runtime,
                 publish_lock=self.publish_lock,
+                publish_gate=getattr(self, 'publish_gate', None),
             )
             result = case.run()
             self._emit_followup_content(case.form_values)
@@ -490,11 +552,9 @@ class FollowupBatch:
             self.executor = executor
         self.abort_event.clear()
         requested_workers = max(1, int(workers or 1))
-        if not config.FOLLOWUP_CONCURRENCY_ENABLED and requested_workers != 1:
-            self.debug('\u670d\u52a1\u5668\u9650\u5236\uff1a\u8ddf\u8fdb\u5199\u5165\u56fa\u5b9a\u5355\u7ebf\u7a0b\uff08\u5ffd\u7565 workers=%d\uff09' % requested_workers)
-            workers = 1
-        else:
-            workers = requested_workers
+        workers = 1
+        if requested_workers != 1:
+            self.debug('跟进记录固定使用单线程，忽略 workers=%d' % requested_workers)
         if shops is None:
             shops = self.load_all_shops() if all_shops else self.load_first_page()
         if announce_count:
@@ -526,16 +586,49 @@ class FollowupBatch:
             }
 
         self.total_targets = len(targets)
-        # Follow-up writes are rate-limited by the server; process shops sequentially.
-        for position, shop in enumerate(targets, 1):
-            self._check()
-            self._note('\u5f00\u59cb\u586b\u5199\u7b2c %d/%d \u5bb6\u5e97\u94fa' % (
-                position, len(targets)
+        actual_workers = min(workers, len(targets))
+        if actual_workers == 1:
+            # Keep the original single-thread path intact for a safe fallback
+            # and for the CLI's default behavior.
+            for position, shop in enumerate(targets, 1):
+                self._check()
+                self.progress_position = position
+                ok = self._fill_one(shop, position)
+                if not ok:
+                    self.debug('\u7b2c %d \u5bb6\u672a\u6210\u529f\uff0c\u7ee7\u7eed\u4e0b\u4e00\u5bb6' % position)
+                self._pace()
+        else:
+            chunks = self._partition_targets(targets, actual_workers)
+            self.debug('预分配跟进任务：%d 个线程，分片=%s' % (
+                actual_workers, '/'.join(str(len(chunk)) for chunk in chunks)
             ))
-            ok = self._fill_one(shop, position)
-            if not ok:
-                self.debug('\u7b2c %d \u5bb6\u672a\u6210\u529f\uff0c\u7ee7\u7eed\u4e0b\u4e00\u5bb6' % position)
-            self._pace()
+            self._note('并行填写跟进记录：%d 个线程，分片=%s' % (
+                actual_workers, '/'.join(str(len(chunk)) for chunk in chunks)
+            ))
+            executor = self.executor
+            owned_executor = executor is None
+            if owned_executor:
+                executor = DaemonThreadPoolExecutor(
+                    max_workers=actual_workers,
+                    thread_name_prefix='YouzanBatch',
+                )
+            futures = []
+            try:
+                # Submit every pre-planned chunk first.  Waiting only after all
+                # submissions is what makes this a real parallel phase.
+                for chunk in chunks:
+                    futures.append(executor.submit(self._worker, chunk))
+                for future in futures:
+                    try:
+                        future.result()
+                    except TaskCancelled:
+                        self.abort_event.set()
+                    except Exception as exc:
+                        self.abort_event.set()
+                        self.debug('并行 Worker 致命异常：%r' % exc)
+            finally:
+                if owned_executor:
+                    executor.shutdown(wait=True, cancel_futures=False)
 
         attempted, success, failed, cancelled = self._summary()
         warning_count = sum(

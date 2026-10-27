@@ -211,13 +211,14 @@ class ShopFollowupCase:
 
     def __init__(
         self, bot, log, dry_run=False, shop_id=None, detail_url=None,
-        run_id=None, runtime=None, publish_lock=None,
+        run_id=None, runtime=None, publish_lock=None, publish_gate=None,
     ):
         self.bot = bot
         self.page = bot.page
         self.log = log
         self.runtime = runtime
         self.publish_lock = publish_lock
+        self.publish_gate = publish_gate
         self.stop_event = (
             runtime.stop_event if runtime is not None
             else getattr(bot, 'stop_event', None)
@@ -237,6 +238,9 @@ class ShopFollowupCase:
         self.list_dump_path = ''
         self.form_values = {}
         self.publish_response = None
+        self.publish_clicked_at = None
+        self.publish_response_at = None
+        self.publish_interval_seconds = None
         self.server_warnings = []
         self._publish_before = 0     # 发布前的接口记录游标，用于事后补取响应
         self.viewport = 1600
@@ -934,7 +938,7 @@ class ShopFollowupCase:
         return '操作成功' in str(payload.get('msg') or '')
 
     def _log_publish_detail(self, record):
-        """输出发布接口的业务明细：记录ID、风控提示（不影响成功判定）。"""
+        """保留发布接口返回的原始业务错误，不改写服务端说明。"""
         body = (record or {}).get('response') or ''
         try:
             payload = json.loads(body)
@@ -945,18 +949,46 @@ class ShopFollowupCase:
         data = payload.get('data')
         if isinstance(data, dict) and data.get('visitRecordId'):
             self.log('拜访记录已生成：visitRecordId=%s' % data['visitRecordId'])
+
+        def record_error(code, message):
+            if code in (None, '') and message in (None, ''):
+                return
+            code_text = str(code) if code not in (None, '') else ''
+            message_text = str(message) if message not in (None, '') else ''
+            if code_text in ('0', '200', '20000') and not message_text:
+                return
+            item = {'code': code_text, 'message': message_text}
+            if item in self.server_warnings:
+                return
+            self.server_warnings.append(item)
+            # Keep the values from the response verbatim; this prefix only
+            # identifies the two raw fields and is not a replacement message.
+            self.log('原始错误码=%s 原始错误说明=%s' % (
+                code_text, message_text,
+            ))
+
+        response_status = (record or {}).get('status')
+        response_code = payload.get('code')
+        response_message = payload.get('msg') or payload.get('message')
+        if response_status != 200:
+            record_error(
+                response_code if response_code not in (None, '')
+                else (record or {}).get('resp_code') or response_status,
+                response_message,
+            )
+        elif str(response_code) not in ('0', '200', '20000') and \
+                response_code not in (None, ''):
+            record_error(response_code, response_message)
+
         warnings = data.get('visitReturnCodes') if isinstance(data, dict) else None
         for item in warnings or []:
             if not isinstance(item, dict):
                 continue
-            code = str(item.get('code') or '')
-            message = str(item.get('message') or '')
-            if code == '4' or '\u592a\u5feb' in message:
-                warning = {'code': code, 'message': message}
-                self.server_warnings.append(warning)
-                self.log('\u670d\u52a1\u5668\u4e1a\u52a1\u63d0\u793a\uff1acode=%s\uff0c%s\uff08\u8bb0\u5f55\u5df2\u5199\u5165\uff0c\u5f53\u524d\u4efb\u52a1\u7ee7\u7eed\uff09' % (
-                    code or '-', message or '\u672a\u63d0\u4f9b\u8bf4\u660e',
-                ))
+            code = item.get('code')
+            message = item.get('message')
+            if str(code) not in ('0', '200', '20000') or (
+                    message not in (None, '', '\u6210\u529f\u6dfb\u52a0\u62dc\u8bbf')):
+                record_error(code, message)
 
     def publish(self):
         if self.publish_lock is None:
@@ -982,6 +1014,19 @@ class ShopFollowupCase:
 
         self._publish_before = len(self.recorder.records)
         started = time.perf_counter()
+        if self.publish_gate is not None:
+            self.publish_interval_seconds = self.publish_gate.wait_before_click(
+                self.shop_id
+            )
+        self.publish_clicked_at = time.time()
+        millis = int((self.publish_clicked_at % 1) * 1000)
+        self.log('\u53d1\u5e03\u70b9\u51fb\uff1a\u5e97\u94faID=%s \u65f6\u95f4\u6233=%s.%03d \u4e24\u6b21\u63d0\u4ea4\u95f4\u9694=%s\u79d2' % (
+            self.shop_id,
+            time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.publish_clicked_at)),
+            millis,
+            '-' if self.publish_interval_seconds is None
+            else '%.3f' % self.publish_interval_seconds,
+        ))
         # @decision DEC-1 用 expect_response 事件驱动等待，替代固定 sleep 轮询。
         # 原因：Playwright 同步 API 的事件循环只在 Playwright 调用期间运行（greenlet 调度），
         # 纯 Event.wait 等待期间 page.on('response') 不会触发，响应永远采集不到。
@@ -1006,6 +1051,7 @@ class ShopFollowupCase:
                     self.log('已点击发布确认「确定」')
                     self._sleep(0.3)
             self.publish_response = self._record_from_response(info.value)
+            self.publish_response_at = time.time()
             self.log('发布接口响应耗时 %.2f 秒' % (time.perf_counter() - started))
         except PlaywrightTimeoutError:
             # 超时后事件已由 expect_response 驱动过一轮，先看看是否只是晚到
@@ -1105,11 +1151,11 @@ class ShopFollowupCase:
 
     @staticmethod
     def _response_msg(record):
-        """提取接口返回的业务提示，失败时给出真实原因而不是“无响应”。"""
+        """提取接口返回的业务提示，不截断原始服务端说明。"""
         try:
             payload = json.loads((record or {}).get('response') or '')
             message = payload.get('msg') or payload.get('message') or ''
-            return str(message)[:120]
+            return str(message)
         except Exception:
             return ''
 
@@ -1147,16 +1193,15 @@ class ShopFollowupCase:
             self._sleep(0.25)
         if not (text_ok or api_ok):
             if self.publish_response:
-                reason = '接口 %s %s HTTP=%s code=%s msg=%s，页面无成功提示' % (
-                    self.publish_response['method'],
-                    self.publish_response['path'],
-                    self.publish_response['status'],
-                    self.publish_response.get('resp_code', '-'),
-                    self._response_msg(self.publish_response) or '-',
-                )
-            else:
-                reason = '未捕获到发布接口响应，页面无成功提示'
-            raise RuntimeError('未检测到发布成功信号：' + reason)
+                # When the server answered, preserve its raw code/message as
+                # the failure payload. Do not replace it with a local guess.
+                raw_code = self.publish_response.get('resp_code')
+                raw_message = self._response_msg(self.publish_response)
+                raise RuntimeError(json.dumps({
+                    'code': raw_code,
+                    'message': raw_message,
+                }, ensure_ascii=False))
+            raise RuntimeError('\u672a\u6355\u83b7\u5230\u53d1\u5e03\u63a5\u53e3\u54cd\u5e94\uff0c\u9875\u9762\u65e0\u6210\u529f\u63d0\u793a')
         self.result['publish_success'] = True
         self.log('发布成功：%s' % ('接口返回成功' if api_ok else '页面提示'))
         return 'text=%s api=%s' % (text_ok, api_ok)
@@ -1181,6 +1226,9 @@ class ShopFollowupCase:
                 'functions_total': len(self.functions),
                 'form_values': self.form_values,
                 'publish_response': self.publish_response,
+                'publish_clicked_at': self.publish_clicked_at,
+                'publish_response_at': self.publish_response_at,
+                'publish_interval_seconds': self.publish_interval_seconds,
                 'server_warnings': self.server_warnings,
                 'api_count': api_summary['count'],
                 'api_endpoints': api_summary['endpoints'],
