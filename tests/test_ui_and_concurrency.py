@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """Headless checks for credential UI sync, log actions, and concurrency."""
 import sys
-import threading
-import time
 import tkinter as tk
 from tkinter import scrolledtext
 from pathlib import Path
@@ -92,7 +90,7 @@ def test_repeat_followup_asks_and_allows_explicit_continue():
              patch.object(main, '_make_debug_log', lambda _name: (lambda _msg: None)), \
              patch.object(main, '_confirm_repeat_followup', return_value=True):
             result = main._auto_followup_after_login(
-                object(), {'auto_shop_list': True, 'auto_fill_all': True, 'workers': 2}
+                object(), {'auto_shop_list': True, 'auto_fill_all': True, 'workers': 1}
             )
         assert result['success'] is True
         assert FakeRepeatBatch.last_run['skip_done'] is False
@@ -110,7 +108,7 @@ def test_repeat_followup_refusal_stops_without_running_batch():
              patch.object(followup_batch_module, 'FollowupBatch', FakeRepeatBatch), \
              patch.object(main, '_confirm_repeat_followup', return_value=False):
             result = main._auto_followup_after_login(
-                object(), {'auto_shop_list': True, 'auto_fill_all': True, 'workers': 2}
+                object(), {'auto_shop_list': True, 'auto_fill_all': True, 'workers': 1}
             )
         assert result['success'] is False
         assert result['refused'] is True
@@ -140,22 +138,19 @@ def test_log_copy_and_clear_actions():
         main.root, main.log_widget = old_root, old_widget
         root.destroy()
 
-def test_thread_pool_io_tasks_overlap():
-    started = []
-    lock = threading.Lock()
+def test_ui_always_uses_one_worker():
+    old_worker_var = main.worker_count_var
 
-    def work(_item):
-        with lock:
-            started.append(time.perf_counter())
-        time.sleep(0.10)
+    class FakeWorkerVar:
+        @staticmethod
+        def get():
+            return '7'
 
-    from concurrent.futures import ThreadPoolExecutor
-    started_at = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        list(pool.map(work, range(10)))
-    elapsed = time.perf_counter() - started_at
-    assert elapsed < 0.45, elapsed
-    assert len(started) == 10
+    try:
+        main.worker_count_var = FakeWorkerVar()
+        assert main._read_workers() == 1
+    finally:
+        main.worker_count_var = old_worker_var
 
 
 if __name__ == '__main__':
@@ -163,5 +158,5 @@ if __name__ == '__main__':
     test_repeat_followup_asks_and_allows_explicit_continue()
     test_repeat_followup_refusal_stops_without_running_batch()
     test_log_copy_and_clear_actions()
-    test_thread_pool_io_tasks_overlap()
-    print('PASS UI sync and concurrency overlap')
+    test_ui_always_uses_one_worker()
+    print('PASS UI sync and fixed single-thread mode')

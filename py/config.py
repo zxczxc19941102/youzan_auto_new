@@ -140,19 +140,26 @@ DEFAULT_PWD = _PASSWORD_FROM_ENV or _unprotect_password(_LOCAL_PASSWORD_VALUE)
 DEFAULT_AUTO_SHOP_LIST = _as_bool(_LOCAL_CONFIG.get('auto_shop_list'), True)
 DEFAULT_AUTO_FILL_ALL = _as_bool(_LOCAL_CONFIG.get('auto_fill_all'), True)
 DEFAULT_FILL_ALL_DRY = _as_bool(_LOCAL_CONFIG.get('fill_all_dry'), False)
-FOLLOWUP_CONCURRENCY_ENABLED = False  # server warns on concurrent visit/save writes
+# Follow-up publishing is intentionally serialized.  The server-side flow is
+# safer and more predictable when one account sends one record at a time.
+FOLLOWUP_CONCURRENCY_ENABLED = False
+FOLLOWUP_MAX_WORKERS = 1
+FOLLOWUP_PUBLISH_INTERVAL_SECONDS = 3.01
 DEFAULT_PROXY_SERVER = (
     os.environ.get('YOUZAN_PROXY_SERVER')
     or str(_LOCAL_CONFIG.get('proxy_server') or 'http://127.0.0.1:10808').strip()
 )
 try:
-    DEFAULT_WORKERS = 1 if not FOLLOWUP_CONCURRENCY_ENABLED else max(1, min(10, int(_LOCAL_CONFIG.get('workers', 3))))
+    DEFAULT_WORKERS = (
+        1 if not FOLLOWUP_CONCURRENCY_ENABLED
+        else max(1, min(FOLLOWUP_MAX_WORKERS, int(_LOCAL_CONFIG.get('workers', 1))))
+    )
 except (TypeError, ValueError):
     DEFAULT_WORKERS = 1
 
 
 def save_local_config(username, password, auto_shop_list=True,
-                      auto_fill_all=True, fill_all_dry=False, workers=3,
+                      auto_fill_all=True, fill_all_dry=False, workers=1,
                       proxy_server=None):
     """Atomically save ignored local GUI settings."""
     ensure_dirs()
@@ -162,7 +169,10 @@ def save_local_config(username, password, auto_shop_list=True,
         'auto_shop_list': bool(auto_shop_list),
         'auto_fill_all': bool(auto_fill_all),
         'fill_all_dry': bool(fill_all_dry),
-        'workers': 1 if not FOLLOWUP_CONCURRENCY_ENABLED else max(1, min(10, int(workers))),
+        'workers': (
+            1 if not FOLLOWUP_CONCURRENCY_ENABLED
+            else max(1, min(FOLLOWUP_MAX_WORKERS, int(workers)))
+        ),
         'proxy_server': str(proxy_server or DEFAULT_PROXY_SERVER).strip(),
     }
     fd, temp_path = tempfile.mkstemp(
@@ -193,6 +203,16 @@ NAV_TIMEOUT_MS = 45000          # 页面跳转
 DETAIL_NAV_TIMEOUT_MS = 30000   # 店铺详情（hash 路由，commit 即返回更快）
 ASSERT_TIMEOUT_MS = 15000       # 断言类等待（wait_for_function / load_state）
 FOLLOWUP_FORM_TIMEOUT_MS = 30000  # async follow-up panel/form render timeout
+
+# Login speed tuning. Prefer DOM/network readiness over fixed sleeps.
+LOGIN_PAGE_SETTLE_SECONDS = 0.30
+CAPTCHA_IMAGE_SETTLE_SECONDS = 0.80
+CAPTCHA_IMAGE_POLL_SECONDS = 0.10
+CAPTCHA_IMAGE_READY_TIMEOUT_SECONDS = 3.00
+CAPTCHA_RESULT_POLL_SECONDS = 0.10
+CAPTCHA_RESULT_TIMEOUT_SECONDS = 3.20
+LOGIN_STATE_POLL_SECONDS = 0.25
+WORKBENCH_SETTLE_SECONDS = 0.20
 
 # 重试与限速：失败指数退避，请求之间随机停顿，避免高频空转压垮对端与本机
 RETRY_ATTEMPTS = 2              # 单个网络动作最大尝试次数

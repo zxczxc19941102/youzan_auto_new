@@ -8,10 +8,9 @@
       python main.py --list-shops         （读取「我的店铺」全部店铺并输出日志，只读）
       python main.py --fill-first3        （填写第一页前3家店铺的跟进记录并发布）
       python main.py --fill-first3-dry    （只填写前3家，不发布）
-      python main.py --fill-all           （全量店铺跟进；失败即停止）
-      python main.py --fill-all --skip 3  （跳过前3家，避免重复）
-      python main.py --fill-all --workers 5（5线程并发填写）
-      python main.py --fill-all-dry --workers 10（10线程试填写，不发布）
+      python main.py --fill-all           (固定单线程填写并发布)
+      python main.py --fill-all --skip 3  (跳过前3家，避免重复)
+      python main.py --fill-all-dry       (固定单线程试填写，不发布)
 
 登录流程：1
   - 点「开始登录」：若本地有 CK 或完整 auth_state，先执行免密登录；失败再转常规登录。
@@ -115,7 +114,7 @@ btn_start = btn_submit = btn_ck = btn_stop = log_widget = None
 auto_shop_list_var = None  # GUI 勾选：登录成功后读取店铺列表（只读）
 auto_fill_all_var = None   # GUI 勾选：登录后全量填写跟进记录
 fill_all_dry_var = None    # GUI 勾选：全量跟进试运行（不发布）
-worker_count_var = None    # GUI 下拉：并发线程数
+worker_count_var = None    # GUI 固定单线程
 proxy_server_var = None    # 本地代理，仅保存在本地配置
 
 # ---- 运行状态（全部由主线程读写，工作线程只投递队列） ----
@@ -407,14 +406,8 @@ def enable_code_ui():
 
 
 def _read_workers():
-    """Read and clamp the worker count from the GUI."""
-    try:
-        value = int(worker_count_var.get()) if worker_count_var else config.DEFAULT_WORKERS
-    except Exception:
-        value = config.DEFAULT_WORKERS
-    if not config.FOLLOWUP_CONCURRENCY_ENABLED:
-        return 1
-    return max(1, min(10, value))
+    """Return the only supported follow-up worker count: one."""
+    return 1
 
 
 def _read_ui_settings():
@@ -660,10 +653,10 @@ def _auto_followup_after_login(bot_obj, settings):
         return {'success': False, 'count': len(shops), 'cancelled': True}
 
     dry_run = bool(settings.get('fill_all_dry', False))
-    requested_workers = max(1, min(10, int(settings.get('workers', config.DEFAULT_WORKERS))))
-    workers = requested_workers if config.FOLLOWUP_CONCURRENCY_ENABLED else 1
-    if requested_workers != workers:
-        log('\u68c0\u6d4b\u5230\u670d\u52a1\u5668\u5bf9\u8ddf\u8fdb\u5199\u5165\u6709\u9650\u5236\uff0c\u5df2\u5c06\u5e76\u53d1 %d \u5f3a\u5236\u964d\u4e3a\u5355\u7ebf\u7a0b' % requested_workers)
+    requested_workers = settings.get('workers', 1)
+    workers = 1
+    if str(requested_workers) != '1':
+        log('跟进记录固定使用单线程，已忽略其他线程设置')
     fill_debug = _make_debug_log('fill_all')
     skip_done = not repeat_followup
     batch_done_ids = set() if repeat_followup else today_ids
@@ -987,7 +980,7 @@ def run_gui():
         variable=fill_all_dry_var,
     ).grid(row=5, column=0, sticky='w', pady=4)
 
-    tk.Label(frm, text='并发线程').grid(row=5, column=1, sticky='e', padx=4)
+    tk.Label(frm, text='执行线程（固定1）').grid(row=5, column=1, sticky='e', padx=4)
     worker_count_var = tk.StringVar(value=str(config.DEFAULT_WORKERS))
     ttk.Combobox(
         frm,
@@ -1207,13 +1200,7 @@ if __name__ == '__main__':
             _skip = 0
     _workers = 1
     if '--workers' in sys.argv:
-        try:
-            _workers = max(1, int(sys.argv[sys.argv.index('--workers') + 1]))
-            if not config.FOLLOWUP_CONCURRENCY_ENABLED and _workers != 1:
-                log('\u670d\u52a1\u5668\u9650\u5236\uff1a\u5ffd\u7565 --workers=%d\uff0c\u4f7f\u7528\u5355\u7ebf\u7a0b' % _workers)
-                _workers = 1
-        except Exception:
-            _workers = 1
+        log('跟进记录固定使用单线程，忽略 --workers 参数')
     if '--fill-all-dry' in sys.argv:
         raise SystemExit(0 if run_fill_all_cli(
             skip=_skip, dry_run=True, workers=_workers

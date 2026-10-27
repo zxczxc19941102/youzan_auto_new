@@ -115,8 +115,11 @@ class TaskRuntime:
             else:
                 self.interrupted_count += 1
 
-    def emit(self, message, kind='normal', source=None):
-        active, total = self.counts()
+    def emit(self, message, kind='normal', source=None, progress=None):
+        if progress is None:
+            active, total = self.counts()
+        else:
+            active, total = progress
         current = threading.current_thread()
         name = source or (
             '主控' if current is threading.main_thread() else current.name
@@ -134,6 +137,13 @@ class TaskRuntime:
             print(line, flush=True)
         except Exception:
             pass
+
+    def emit_progress(self, message, current, total, kind='normal', source=None):
+        """Emit a log line with batch progress instead of worker-pool counts."""
+        self.emit(
+            message, kind=kind, source=source,
+            progress=(max(0, int(current)), max(0, int(total))),
+        )
 
     @contextlib.contextmanager
     def step(
