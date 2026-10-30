@@ -60,7 +60,6 @@ class FollowupBatch:
         self.total_targets = 0
         self.progress_position = 0
         self._print_lock = threading.Lock()
-        self._content_logged = False
 
     @staticmethod
     def _partition_targets(targets, workers):
@@ -254,7 +253,6 @@ class FollowupBatch:
                     publish_gate=getattr(self, 'publish_gate', None),
                 )
                 result = case.run()
-                self._emit_followup_content(case.form_values)
                 success = bool(result.get('success'))
                 error = result.get('error', '')
             except TaskCancelled:
@@ -310,21 +308,6 @@ class FollowupBatch:
                 'server_warnings': warnings,
                 'steps': steps,
             })
-
-    def _emit_followup_content(self, values):
-        """首次表单填完后，在主日志用代码块展示实际跟进内容。"""
-        labels = ('跟进方式', '跟进目的', '沟通情况', '客户需求/备注')
-        if not all(values.get(label) for label in labels):
-            return
-        with self._print_lock:
-            if self._content_logged:
-                return
-            self._content_logged = True
-            lines = ['%s：%s' % (label, values[label]) for label in labels]
-            fence = chr(96) * 3
-            self._note('跟进内容：\n%s\n%s\n%s' % (
-                fence, '\n'.join(lines), fence
-            ))
 
     def _step_lines(self, steps):
         wanted = {
@@ -461,7 +444,6 @@ class FollowupBatch:
                 publish_gate=getattr(self, 'publish_gate', None),
             )
             result = case.run()
-            self._emit_followup_content(case.form_values)
             success = bool(result.get('success'))
             error = result.get('error', '')
         except TaskCancelled:

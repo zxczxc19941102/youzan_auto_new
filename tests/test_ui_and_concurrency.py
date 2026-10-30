@@ -99,6 +99,42 @@ def test_repeat_followup_asks_and_allows_explicit_continue():
         main.runner = old_runner
 
 
+def test_crm_failure_is_not_masked_by_successful_shop_phase():
+    FakeRepeatBatch.last_run = None
+    old_runner = main.runner
+    try:
+        main.runner = None
+        with patch.object(main, '_run_crm_menu_followup', return_value={
+            'success': False, 'attempted': 1, 'failed': 1,
+        }), \
+             patch.object(shop_list_reader_module, 'ShopListReader', FakeRepeatReader), \
+             patch.object(followup_batch_module, 'FollowupBatch', FakeRepeatBatch), \
+             patch.object(main, 'DaemonThreadPoolExecutor', FakeExecutor), \
+             patch.object(main, '_make_debug_log', lambda _name: (lambda _msg: None)), \
+             patch.object(main, '_confirm_repeat_followup', return_value=True), \
+             patch.object(main, 'log') as log_mock:
+            result = main._auto_followup_after_login(
+                object(), {
+                    'auto_shop_list': True,
+                    'auto_fill_all': True,
+                    'followup_customer': True,
+                    'followup_shop': True,
+                    'workers': 1,
+                }
+            )
+        content_logs = [
+            call.args[0] for call in log_mock.call_args_list
+            if str(call.args[0]).startswith('\u8ddf\u8fdb\u5185\u5bb9?')
+        ]
+        assert len(content_logs) == 1
+        assert '\u5ba2\u6237\u9700\u6c42/\u5907\u6ce8?\u6709\u9700\u8981\u4f1a\u8054\u7cfb' in content_logs[0]
+        assert result['success'] is False
+        assert result['targets']['customer']['success'] is False
+        assert result['targets']['shop']['success'] is True
+    finally:
+        main.runner = old_runner
+
+
 def test_repeat_followup_refusal_stops_without_running_batch():
     FakeRepeatBatch.last_run = None
     old_runner = main.runner

@@ -140,11 +140,23 @@ DEFAULT_PWD = _PASSWORD_FROM_ENV or _unprotect_password(_LOCAL_PASSWORD_VALUE)
 DEFAULT_AUTO_SHOP_LIST = _as_bool(_LOCAL_CONFIG.get('auto_shop_list'), True)
 DEFAULT_AUTO_FILL_ALL = _as_bool(_LOCAL_CONFIG.get('auto_fill_all'), True)
 DEFAULT_FILL_ALL_DRY = _as_bool(_LOCAL_CONFIG.get('fill_all_dry'), False)
+DEFAULT_FOLLOWUP_CLUE = _as_bool(_LOCAL_CONFIG.get('followup_clue'), False)
+DEFAULT_FOLLOWUP_CUSTOMER = _as_bool(_LOCAL_CONFIG.get('followup_customer'), False)
+DEFAULT_FOLLOWUP_SHOP = _as_bool(_LOCAL_CONFIG.get('followup_shop'), True)
 # Follow-up publishing is intentionally serialized.  The server-side flow is
 # safer and more predictable when one account sends one record at a time.
 FOLLOWUP_CONCURRENCY_ENABLED = False
 FOLLOWUP_MAX_WORKERS = 1
 FOLLOWUP_PUBLISH_INTERVAL_SECONDS = 3.01
+# CRM \u63a5\u53e3\u6a21\u5f0f\uff0f\u5931\u8d25\u65f6\u53ef\u56de\u9000\u5230UI \u6a21\u5f0f
+CRM_FOLLOWUP_MODE = str(_LOCAL_CONFIG.get('crm_followup_mode') or 'api').strip().lower()
+CRM_API_RETRY_ATTEMPTS = 2
+CRM_API_PAGE_SIZE = 100
+CRM_API_REQUEST_TIMEOUT_MS = 20000
+CRM_API_SKIP_TODAY_DUPLICATES = True
+# The save endpoint is eventually consistent with /visit/search. Poll only for read-back; never resubmit.
+CRM_API_VERIFY_ATTEMPTS = 8
+CRM_API_VERIFY_POLL_SECONDS = 0.75
 DEFAULT_PROXY_SERVER = (
     os.environ.get('YOUZAN_PROXY_SERVER')
     or str(_LOCAL_CONFIG.get('proxy_server') or 'http://127.0.0.1:10808').strip()
@@ -160,7 +172,9 @@ except (TypeError, ValueError):
 
 def save_local_config(username, password, auto_shop_list=True,
                       auto_fill_all=True, fill_all_dry=False, workers=1,
-                      proxy_server=None):
+                      proxy_server=None, followup_clue=False,
+                      followup_customer=False, followup_shop=True,
+                      crm_followup_mode=None):
     """Atomically save ignored local GUI settings."""
     ensure_dirs()
     payload = {
@@ -169,11 +183,15 @@ def save_local_config(username, password, auto_shop_list=True,
         'auto_shop_list': bool(auto_shop_list),
         'auto_fill_all': bool(auto_fill_all),
         'fill_all_dry': bool(fill_all_dry),
+        'followup_clue': bool(followup_clue),
+        'followup_customer': bool(followup_customer),
+        'followup_shop': bool(followup_shop),
         'workers': (
             1 if not FOLLOWUP_CONCURRENCY_ENABLED
             else max(1, min(FOLLOWUP_MAX_WORKERS, int(workers)))
         ),
         'proxy_server': str(proxy_server or DEFAULT_PROXY_SERVER).strip(),
+        'crm_followup_mode': str(crm_followup_mode or CRM_FOLLOWUP_MODE).strip().lower(),
     }
     fd, temp_path = tempfile.mkstemp(
         prefix='.local_config_', suffix='.tmp', dir=JSON_DIR
@@ -202,6 +220,9 @@ ACTION_TIMEOUT_MS = 20000       # 单次点击/填表/等待元素
 NAV_TIMEOUT_MS = 45000          # 页面跳转
 DETAIL_NAV_TIMEOUT_MS = 30000   # 店铺详情（hash 路由，commit 即返回更快）
 ASSERT_TIMEOUT_MS = 15000       # 断言类等待（wait_for_function / load_state）
+# Conservative Playwright polling prevents long DOM waits from saturating CPU.
+WAIT_POLLING_MS = 250
+CAPTCHA_WAIT_POLLING_MS = 180
 FOLLOWUP_FORM_TIMEOUT_MS = 30000  # async follow-up panel/form render timeout
 
 # Login speed tuning. Prefer DOM/network readiness over fixed sleeps.

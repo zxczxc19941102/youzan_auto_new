@@ -114,6 +114,9 @@ btn_start = btn_submit = btn_ck = btn_stop = log_widget = None
 auto_shop_list_var = None  # GUI 勾选：登录成功后读取店铺列表（只读）
 auto_fill_all_var = None   # GUI 勾选：登录后全量填写跟进记录
 fill_all_dry_var = None    # GUI 勾选：全量跟进试运行（不发布）
+followup_clue_var = None
+followup_customer_var = None
+followup_shop_var = None
 worker_count_var = None    # GUI 固定单线程
 proxy_server_var = None    # 本地代理，仅保存在本地配置
 
@@ -416,6 +419,9 @@ def _read_ui_settings():
         'auto_shop_list': bool(auto_shop_list_var and auto_shop_list_var.get()),
         'auto_fill_all': bool(auto_fill_all_var and auto_fill_all_var.get()),
         'fill_all_dry': bool(fill_all_dry_var and fill_all_dry_var.get()),
+        'followup_clue': bool(followup_clue_var and followup_clue_var.get()),
+        'followup_customer': bool(followup_customer_var and followup_customer_var.get()),
+        'followup_shop': bool(followup_shop_var and followup_shop_var.get()),
         'workers': _read_workers(),
         'proxy_server': (
             proxy_server_var.get().strip()
@@ -477,6 +483,9 @@ def _save_login_config(user, pwd, settings):
             fill_all_dry=settings.get('fill_all_dry', False),
             workers=settings.get('workers', config.DEFAULT_WORKERS),
             proxy_server=settings.get('proxy_server', config.DEFAULT_PROXY_SERVER),
+            followup_clue=settings.get('followup_clue', False),
+            followup_customer=settings.get('followup_customer', False),
+            followup_shop=settings.get('followup_shop', True),
         )
         log('\u672c\u673a\u914d\u7f6e\u5df2\u4fdd\u5b58\uff1a\u8d26\u53f7\u3001\u5bc6\u7801\u53ca\u754c\u9762\u9009\u9879\uff08\u4ec5\u672c\u5730\u6587\u4ef6\uff0c\u4e0d\u4e0a\u4f20\uff09')
     except Exception as exc:
@@ -593,6 +602,35 @@ def _wait_code_input(timeout=300):
     return ''
 
 
+def _run_crm_menu_followup(bot_obj, target_kind, settings):
+    """Run CRM clue/customer follow-up using API by default, with explicit UI fallback."""
+    from crm_followup_batch import CrmFollowupBatch
+    from crm_list_reader import CrmListReader, TARGETS
+    label = TARGETS[target_kind]['label']
+    debug_log = _make_debug_log('%s_list_run' % target_kind)
+    dry_run = bool(settings.get('fill_all_dry', False))
+    mode = str(settings.get('crm_followup_mode') or config.CRM_FOLLOWUP_MODE).strip().lower()
+    if mode == 'ui':
+        reader = CrmListReader(bot_obj, target_kind, log, debug=debug_log, runtime=runner)
+        log('\u5f00\u59cb%s\u8ddf\u8fdb\u8bb0\u5f55' % label)
+        read_result = reader.run(); items = reader.items
+        if not read_result.get('success') or not items:
+            log('%s\u5217\u8868\u8bfb\u53d6\u5931\u8d25\uff0c\u672a\u83b7\u53d6\u5230\u9879\u76ee' % label)
+            return {'success': False, 'count': 0, 'failed': 1}
+        if stop_flag.is_set(): return {'success': False, 'count': len(items), 'cancelled': True}
+        result = CrmFollowupBatch(bot_obj, target_kind, raw_log, styled_log, debug_log, dry_run=dry_run, runtime=runner).run(items)
+        count = len(items)
+    else:
+        from crm_api import CrmApiFollowupBatch
+        result = CrmApiFollowupBatch(bot_obj, target_kind, log, debug=debug_log, dry_run=dry_run, runtime=runner).run()
+        count = result.get('total', result.get('attempted', 0))
+        if result.get('total', 0) != result.get('attempted', 0):
+            log('%s\u63a5\u53e3\u6570\u91cf\u4e0d\u4e00\u81f4\uff1atotal=%d attempted=%d' % (label, result.get('total', 0), result.get('attempted', 0)))
+            result['failed'] = max(1, result.get('failed', 0))
+    log('%s\u8ddf\u8fdb\u5904\u7406\u5b8c\u6210\uff1a\u6210\u529f%d\u6761\uff0c\u5931\u8d25%d\u6761' % (label, result.get('success', 0), result.get('failed', 0)))
+    return {'success': result.get('failed', 0) == 0 and result.get('attempted', 0) == count, 'count': count, **result}
+
+
 def _auto_followup_after_login(bot_obj, settings):
     """登录成功后读取店铺数量，并按勾选执行跟进记录。"""
     from followup_batch import FollowupBatch
@@ -600,9 +638,40 @@ def _auto_followup_after_login(bot_obj, settings):
 
     auto_fill_all = bool(settings.get('auto_fill_all', True))
     show_shop_count = bool(settings.get('auto_shop_list', True))
+    selected = {
+        'clue': bool(settings.get('followup_clue', False)),
+        'customer': bool(settings.get('followup_customer', False)),
+        'shop': bool(settings.get('followup_shop', True)),
+    }
     rt = runner
-    if not auto_fill_all and not show_shop_count:
+    if not auto_fill_all:
+        selected['clue'] = selected['customer'] = selected['shop'] = False
+    if not any(selected.values()) and not show_shop_count:
         return {'success': True, 'skipped': True}
+
+    aggregate = {'success': True, 'targets': {}}
+    if auto_fill_all and any(selected.values()):
+        log('\u8ddf\u8fdb\u5185\u5bb9\uff1a\n%s\n%s\n%s' % (
+            chr(96) * 3,
+            '\n'.join((
+                '\u8ddf\u8fdb\u65b9\u5f0f\uff1a\u7535\u8bdd\u62dc\u8bbf',
+                '\u8ddf\u8fdb\u76ee\u7684\uff1a\u4e86\u89e3\u9700\u6c42',
+                '\u6c9f\u901a\u60c5\u51b5\uff1a\u7535\u8bdd\u6253\u901a\uff0c\u6709\u4ea4\u6d41',
+                '\u5ba2\u6237\u9700\u6c42/\u5907\u6ce8\uff1a\u6709\u9700\u8981\u4f1a\u8054\u7cfb',
+            )),
+            chr(96) * 3,
+        ))
+    for target_kind in ('clue', 'customer'):
+        if not selected[target_kind]:
+            continue
+        target_result = _run_crm_menu_followup(bot_obj, target_kind, settings)
+        aggregate['targets'][target_kind] = target_result
+        aggregate['success'] = aggregate['success'] and bool(target_result.get('success'))
+
+    if not selected['shop']:
+        if not selected['clue'] and not selected['customer']:
+            log('\u8ddf\u8fdb\u8bb0\u5f55\u83dc\u5355\u672a\u9009\u62e9\u4efb\u4f55\u533a\u57df')
+        return aggregate
 
     debug_log = _make_debug_log('shop_list_run')
     reader = ShopListReader(
@@ -698,11 +767,19 @@ def _auto_followup_after_login(bot_obj, settings):
         result.get('success', 0), result.get('failed', 0),
         result.get('cancelled', 0),
     ))
-    return {
+    shop_result = {
         'success': result.get('failed', 0) == 0 and result.get('cancelled', 0) == 0,
         'count': len(shops),
         **result,
     }
+    aggregate['targets']['shop'] = shop_result
+    aggregate['success'] = aggregate['success'] and bool(shop_result.get('success'))
+    # Do not spread shop_result after aggregate: that would overwrite the
+    # aggregate success flag and mask clue/customer failures when the shop
+    # phase succeeds.
+    result = dict(aggregate)
+    result.update({key: value for key, value in shop_result.items() if key != 'success'})
+    return result
 
 
 def login_worker(user, pwd, settings):
@@ -920,6 +997,7 @@ def run_gui():
     global root, entry_user, entry_pwd, entry_code, log_widget
     global btn_start, btn_submit, btn_ck, btn_stop
     global auto_shop_list_var, auto_fill_all_var, fill_all_dry_var, worker_count_var
+    global followup_clue_var, followup_customer_var, followup_shop_var
     global proxy_server_var
     root = tk.Tk()
     root.title('有赞后台自动登录（滑块+短信+抓CK）')
@@ -974,26 +1052,27 @@ def run_gui():
         variable=auto_fill_all_var,
     ).grid(row=4, column=0, columnspan=2, sticky='w', pady=4)
 
+    followup_frame = tk.LabelFrame(frm, text='\u8ddf\u8fdb\u8bb0\u5f55\u83dc\u5355\u9009\u62e9')
+    followup_frame.grid(row=5, column=0, columnspan=3, sticky='w', pady=6)
+    followup_clue_var = tk.BooleanVar(value=config.DEFAULT_FOLLOWUP_CLUE)
+    followup_customer_var = tk.BooleanVar(value=config.DEFAULT_FOLLOWUP_CUSTOMER)
+    followup_shop_var = tk.BooleanVar(value=config.DEFAULT_FOLLOWUP_SHOP)
+    tk.Checkbutton(followup_frame, text='\u7ebf\u7d22', variable=followup_clue_var).pack(side='left', padx=8)
+    tk.Checkbutton(followup_frame, text='\u5ba2\u6237', variable=followup_customer_var).pack(side='left', padx=8)
+    tk.Checkbutton(followup_frame, text='\u5e97\u94fa', variable=followup_shop_var).pack(side='left', padx=8)
+
     fill_all_dry_var = tk.BooleanVar(value=config.DEFAULT_FILL_ALL_DRY)
     tk.Checkbutton(
-        frm, text='全量跟进试运行（只填表不发布）',
+        frm, text='\u8bd5\u8fd0\u884c\uff1a\u53ea\u586b\u5199\uff0c\u4e0d\u70b9\u51fb\u53d1\u5e03\uff08\u63a8\u8350\u5148\u6d4b\u8bd5\uff09',
         variable=fill_all_dry_var,
-    ).grid(row=5, column=0, sticky='w', pady=4)
+    ).grid(row=6, column=0, columnspan=2, sticky='w', pady=4)
+    tk.Label(frm, text='\u6267\u884c\u7ebf\u7a0b\uff1a\u56fa\u5b9a1').grid(row=6, column=2, sticky='w', padx=6)
+    worker_count_var = tk.StringVar(value='1')
 
-    tk.Label(frm, text='执行线程（固定1）').grid(row=5, column=1, sticky='e', padx=4)
-    worker_count_var = tk.StringVar(value=str(config.DEFAULT_WORKERS))
-    ttk.Combobox(
-        frm,
-        textvariable=worker_count_var,
-        values=('1',),
-        width=5,
-        state='readonly',
-    ).grid(row=5, column=2, sticky='w', padx=6)
-
-    tk.Label(frm, text='本地代理').grid(row=6, column=0, sticky='e', padx=4, pady=4)
+    tk.Label(frm, text='\u672c\u5730\u4ee3\u7406').grid(row=7, column=0, sticky='e', padx=4, pady=4)
     proxy_server_var = tk.StringVar(value=config.DEFAULT_PROXY_SERVER)
     tk.Entry(frm, textvariable=proxy_server_var, width=42).grid(
-        row=6, column=1, columnspan=2, sticky='w', padx=4, pady=4
+        row=7, column=1, columnspan=2, sticky='w', padx=4, pady=4
     )
 
     tk.Label(root, text='运行日志（登录、验证码、工作台和跟进进度）').pack(anchor='w', padx=10)
@@ -1108,6 +1187,42 @@ def _cli_login(logger=log):
     return b
 
 
+def run_crm_followup_cli(target_kind, count=2, dry_run=True):
+    """\u7ebf\u7d22/\u5ba2\u6237\u5c0f\u8303\u56f4\u81ea\u6d4b\uff1b\u9ed8\u8ba4\u53ea\u586b\u5199\u4e0d\u53d1\u5e03\uff0c\u907f\u514d\u672a\u7ecf\u9a8c\u8bc1\u6279\u91cf\u63d0\u4ea4\u3002"""
+    from crm_followup_batch import CrmFollowupBatch
+    from crm_list_reader import CrmListReader, TARGETS
+
+    if target_kind not in TARGETS:
+        log('\u672a\u77e5\u8ddf\u8fdb\u76ee\u6807\uff1a%s' % target_kind)
+        return False
+    debug_log = _make_debug_log('%s_self_test' % target_kind)
+    b = _cli_login(logger=debug_log)
+    if b is None:
+        return False
+    try:
+        if str(config.CRM_FOLLOWUP_MODE).lower() == 'ui':
+            reader = CrmListReader(b, target_kind, log, debug=debug_log)
+            read_result = reader.run()
+            items = reader.items[:max(1, int(count or 2))]
+            if not read_result.get('success') or not items:
+                log('%s\u5217\u8868\u8bfb\u53d6\u5931\u8d25' % TARGETS[target_kind]['label'])
+                return False
+            result = CrmFollowupBatch(b, target_kind, raw_log, styled_log, debug_log, dry_run=bool(dry_run), runtime=None).run(items)
+        else:
+            from crm_api import CrmApiFollowupBatch
+            result = CrmApiFollowupBatch(b, target_kind, log, debug=debug_log, dry_run=bool(dry_run), runtime=None).run(count=None if count is None else int(count))
+        log('%s\u81ea\u6d4b\u7ed3\u675f\uff1a\u6210\u529f%d\u6761\uff0c\u5931\u8d25%d\u6761\uff0c\u8bd5\u8fd0\u884c=%s' % (
+            TARGETS[target_kind]['label'], result.get('success', 0),
+            result.get('failed', 0), dry_run,
+        ))
+        return result.get('attempted', 0) > 0 and result.get('failed', 0) == 0
+    finally:
+        try:
+            b.close()
+        except Exception:
+            pass
+
+
 def run_followup_cli(dry_run=False):
     """运行指定店铺跟进记录测试用例。"""
     from shop_followup import ShopFollowupCase
@@ -1213,6 +1328,10 @@ if __name__ == '__main__':
         raise SystemExit(0 if run_fill_first3_cli(dry_run=True) else 1)
     if '--fill-first3' in sys.argv:
         raise SystemExit(0 if run_fill_first3_cli(dry_run=False) else 1)
+    if '--test-crm-clue-dry' in sys.argv:
+        raise SystemExit(0 if run_crm_followup_cli('clue', count=2, dry_run=True) else 1)
+    if '--test-crm-customer-dry' in sys.argv:
+        raise SystemExit(0 if run_crm_followup_cli('customer', count=2, dry_run=True) else 1)
     if '--test-followup-dry' in sys.argv:
         raise SystemExit(0 if run_followup_cli(dry_run=True) else 1)
     if '--test-followup' in sys.argv:

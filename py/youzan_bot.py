@@ -571,7 +571,8 @@ class YouzanBot:
                 try:
                     page.wait_for_function(
                         "() => [...document.querySelectorAll('.slide-captcha-container')].some(el => el.getBoundingClientRect().width > 0)",
-                        timeout=config.ASSERT_TIMEOUT_MS)
+                        timeout=config.ASSERT_TIMEOUT_MS,
+                        polling=config.CAPTCHA_WAIT_POLLING_MS)
                 except Exception as exc:
                     if self._has_session_conflict():
                         self.log('滑块未出现：检测到账号已在其他设备登录')

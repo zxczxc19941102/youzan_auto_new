@@ -115,8 +115,20 @@ class ApiRecorder:
         self._pending = []
 
     def attach(self, page):
+        self._page = page
         page.on('request', self._on_request)
         page.on('response', self._on_response)
+
+    def detach(self):
+        page = getattr(self, '_page', None)
+        if page is None:
+            return
+        try:
+            page.remove_listener('request', self._on_request)
+            page.remove_listener('response', self._on_response)
+        except Exception:
+            pass
+        self._page = None
 
     def _on_request(self, request):
         try:
@@ -212,6 +224,7 @@ class ShopFollowupCase:
     def __init__(
         self, bot, log, dry_run=False, shop_id=None, detail_url=None,
         run_id=None, runtime=None, publish_lock=None, publish_gate=None,
+        start_at_form=False, record_label='\u5e97\u94fa',
     ):
         self.bot = bot
         self.page = bot.page
@@ -224,6 +237,8 @@ class ShopFollowupCase:
             else getattr(bot, 'stop_event', None)
         )
         self.dry_run = dry_run
+        self.start_at_form = bool(start_at_form)
+        self.record_label = str(record_label or '\u5e97\u94fa')
         self.shop_id = shop_id or SHOP_ID
         self.detail_url = _canonical_detail_url(detail_url or SHOP_DETAIL_URL)
         self.run_id = run_id or time.strftime('%Y%m%d_%H%M%S')
@@ -270,13 +285,13 @@ class ShopFollowupCase:
             raise TaskCancelled()
 
     def _step_inputs(self, name):
-        if '详情' in name:
-            return '店铺ID=%s' % self.shop_id
-        if '表单' in name:
-            return '试运行=%s 店铺ID=%s' % (self.dry_run, self.shop_id)
-        if '发布' in name:
-            return '试运行=%s' % self.dry_run
-        return '店铺ID=%s' % self.shop_id
+        if '\u8be6\u60c5' in name:
+            return '%sID=%s' % (self.record_label, self.shop_id)
+        if '\u8868\u5355' in name:
+            return '\u8bd5\u8fd0\u884c=%s %sID=%s' % (self.dry_run, self.record_label, self.shop_id)
+        if '\u53d1\u5e03' in name:
+            return '\u8bd5\u8fd0\u884c=%s' % self.dry_run
+        return '%sID=%s' % (self.record_label, self.shop_id)
 
     @staticmethod
     def _step_result(detail):
@@ -342,21 +357,25 @@ class ShopFollowupCase:
     def run(self):
         self.recorder.attach(self.page)
         try:
-            self._step('打开指定店铺详情', self.open_detail)
-            self._step('抓取右侧链接与功能点', self.dump_detail)
-            self._step('点击拜访商家打开表单', self.open_followup)
-            self._step('填写跟进表单', self.fill_form)
+            if not self.start_at_form:
+                self._step('\u6253\u5f00\u6307\u5b9a\u5e97\u94fa\u8be6\u60c5', self.open_detail)
+                self._step('\u6293\u53d6\u53f3\u4fa7\u94fe\u63a5\u4e0e\u529f\u80fd\u70b9', self.dump_detail)
+            self._step('\u70b9\u51fb\u62dc\u8bbf\u5546\u5bb6\u6253\u5f00\u8868\u5355', self.open_followup)
+            self._step('\u586b\u5199\u8ddf\u8fdb\u8868\u5355', self.fill_form)
             if self.dry_run:
-                self._step('试运行截图', self.dry_screenshot)
+                self._step('\u8bd5\u8fd0\u884c\u622a\u56fe', self.dry_screenshot)
             else:
-                self._step('确定并发布', self.publish)
-                self._step('验证发布结果', self.verify)
+                self._step('\u786e\u5b9a\u5e76\u53d1\u5e03', self.publish)
+                self._step('\u9a8c\u8bc1\u53d1\u5e03\u7ed3\u679c', self.verify)
             self.result['success'] = True
         except Exception as exc:
             self.result['error'] = repr(exc)[:800]
-            self.log('用例失败：%r' % exc)
+            self.log('\u7528\u4f8b\u5931\u8d25\uff1a%r' % exc)
         finally:
-            self._save_report()
+            try:
+                self._save_report()
+            finally:
+                self.recorder.detach()
         return self.result
 
     def _capture(self, tag):
@@ -394,6 +413,7 @@ class ShopFollowupCase:
             self.page.wait_for_function(
                 "() => /我的店铺|店铺名称|店铺ID/.test(document.body.innerText)",
                 timeout=config.ASSERT_TIMEOUT_MS,
+                polling=config.WAIT_POLLING_MS,
             )
         except TaskCancelled:
             raise
@@ -480,6 +500,7 @@ class ShopFollowupCase:
             self.page.wait_for_function(
                 "() => /跟进记录|基本信息|店铺名称/.test(document.body.innerText)",
                 timeout=config.ASSERT_TIMEOUT_MS,
+                polling=config.WAIT_POLLING_MS,
             )
         except TaskCancelled:
             raise
@@ -611,13 +632,14 @@ class ShopFollowupCase:
             const formReady = [...document.querySelectorAll('.fun-form-item')]
                 .some(el => visible(el) && text(el).includes('\u8ddf\u8fdb\u65b9\u5f0f'));
             const toggleReady = [...document.querySelectorAll(
-                '[class*="SidePanel_toggle"], [data-testid*="visit" i]'
-            )].some(el => visible(el) && text(el).includes('\u62dc\u8bbf\u5546\u5bb6'));
+                '[class*="SidePanel_toggle"], [data-testid*="visit" i], button, [role="button"], a'
+            )].some(el => visible(el) && /\u62dc\u8bbf\u5546\u5bb6|\u53bb\u8ddf\u8fdb|\u5199\u8ddf\u8fdb|\u8ddf\u8fdb/.test(text(el)));
             return formReady || toggleReady;
         }"""
         try:
             self.page.wait_for_function(
-                script, timeout=config.FOLLOWUP_FORM_TIMEOUT_MS
+                script, timeout=config.FOLLOWUP_FORM_TIMEOUT_MS,
+                polling=config.WAIT_POLLING_MS
             )
             return True
         except TaskCancelled:
@@ -638,12 +660,12 @@ class ShopFollowupCase:
             const text = el => (el.innerText || el.textContent || '')
                 .replace(/\s+/g, ' ').trim();
             const candidates = [...document.querySelectorAll(
-                '[class*="SidePanel_toggle"], [data-testid*="visit" i]'
+                '[class*="SidePanel_toggle"], [data-testid*="visit" i], button, [role="button"], a'
             )];
             const el = candidates.find(node =>
-                visible(node) && text(node) === '\u62dc\u8bbf\u5546\u5bb6'
+                visible(node) && /^(\u62dc\u8bbf\u5546\u5bb6|\u53bb\u8ddf\u8fdb|\u5199\u8ddf\u8fdb)$/.test(text(node))
             ) || candidates.find(node =>
-                visible(node) && text(node).includes('\u62dc\u8bbf\u5546\u5bb6')
+                visible(node) && /\u62dc\u8bbf\u5546\u5bb6|\u53bb\u8ddf\u8fdb|\u5199\u8ddf\u8fdb/.test(text(node))
             );
             if (!el) return null;
             el.scrollIntoView({block: 'center', inline: 'nearest'});
@@ -673,7 +695,50 @@ class ShopFollowupCase:
         except Exception:
             return []
 
+    def _wait_for_followup_form(self):
+        """Wait for a visible follow-up form with conservative DOM polling."""
+        try:
+            self.page.wait_for_function(
+                r"""() => {
+                    const visible = el => {
+                        const rect = el.getBoundingClientRect();
+                        const style = getComputedStyle(el);
+                        return rect.width > 0 && rect.height > 0 &&
+                            style.display !== 'none' && style.visibility !== 'hidden' &&
+                            style.opacity !== '0';
+                    };
+                    return [...document.querySelectorAll('.fun-form-item')]
+                        .some(el => visible(el) &&
+                            (el.innerText || el.textContent || '').includes('\u8ddf\u8fdb\u65b9\u5f0f'));
+                }""",
+                timeout=config.FOLLOWUP_FORM_TIMEOUT_MS,
+                polling=config.WAIT_POLLING_MS,
+            )
+        except TaskCancelled:
+            raise
+        except Exception:
+            return False
+        return self._has_followup_form()
+
     def open_followup(self):
+        # The CRM list action (write follow-up/go follow-up) already opens the
+        # form. Do not search for the detail-page visit toggle a second time.
+        if self.start_at_form:
+            if not self._has_followup_form():
+                self.log('\u5217\u8868\u8ddf\u8fdb\u5165\u53e3\u5df2\u70b9\u51fb\uff0c\u7b49\u5f85\u8ddf\u8fdb\u8bb0\u5f55\u8868\u5355\u52a0\u8f7d')
+                self._wait_for_followup_form()
+            if not self._has_followup_form():
+                details = self._followup_panel_diagnostics()
+                self.log('\u5217\u8868\u8ddf\u8fdb\u8868\u5355\u672a\u51fa\u73b0\uff0c\u9875\u9762\u63a7\u4ef6\u8bca\u65ad\uff1a%s' % json.dumps(
+                    details, ensure_ascii=False, separators=(',', ':')
+                )[:2000])
+                raise RuntimeError(
+                    '\u5217\u8868\u8ddf\u8fdb\u5165\u53e3\u5df2\u70b9\u51fb\uff0c\u4f46\u672a\u627e\u5230\u8ddf\u8fdb\u8bb0\u5f55\u8868\u5355\uff08\u7b49\u5f85%dms\u540e\u4ecd\u65e0 .fun-form-item/\u8ddf\u8fdb\u65b9\u5f0f\uff09' %
+                    config.FOLLOWUP_FORM_TIMEOUT_MS
+                )
+            self._capture('followup_form')
+            return 'form ready'
+
         if self._has_followup_form():
             self.log('\u8ddf\u8fdb\u8bb0\u5f55\u8868\u5355\u5df2\u5c55\u5f00\uff0c\u65e0\u9700\u91cd\u590d\u70b9\u51fb')
         else:
@@ -681,7 +746,7 @@ class ShopFollowupCase:
             if ready and not self._has_followup_form():
                 toggle = self._click_followup_toggle()
                 if toggle:
-                    self.log('\u5df2\u70b9\u51fb\u300c\u62dc\u8bbf\u5546\u5bb6\u300d\uff0c\u5c55\u5f00\u53f3\u4fa7\u8868\u5355\uff08%s\uff09' % (
+                    self.log('\u5df2\u70b9\u51fb\u300c\u62dc\u8bbf\u5546\u5bb6\u300d\uff0c\u6253\u5f00\u53f3\u4fa7\u8868\u5355\uff08%s\uff09' % (
                         toggle.get('className') or '\u52a8\u6001\u5f00\u5173',
                     ))
                 else:
@@ -692,25 +757,7 @@ class ShopFollowupCase:
                 ))
 
         if not self._has_followup_form():
-            try:
-                self.page.wait_for_function(
-                    r"""() => {
-                        const visible = el => {
-                            const rect = el.getBoundingClientRect();
-                            const style = getComputedStyle(el);
-                            return rect.width > 0 && rect.height > 0 &&
-                                style.display !== 'none' && style.visibility !== 'hidden';
-                        };
-                        return [...document.querySelectorAll('.fun-form-item')]
-                            .some(el => visible(el) &&
-                                (el.innerText || el.textContent || '').includes('\u8ddf\u8fdb\u65b9\u5f0f'));
-                    }""",
-                    timeout=config.FOLLOWUP_FORM_TIMEOUT_MS,
-                )
-            except TaskCancelled:
-                raise
-            except Exception:
-                pass
+            self._wait_for_followup_form()
 
         if not self._has_followup_form():
             tab = self.page.locator('.fun-tab-bar-tab').filter(has_text='\u8ddf\u8fdb\u8bb0\u5f55')
