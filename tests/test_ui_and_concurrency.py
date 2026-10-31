@@ -124,10 +124,10 @@ def test_crm_failure_is_not_masked_by_successful_shop_phase():
             )
         content_logs = [
             call.args[0] for call in log_mock.call_args_list
-            if str(call.args[0]).startswith('\u8ddf\u8fdb\u5185\u5bb9?')
+            if str(call.args[0]).startswith('\u8ddf\u8fdb\u5185\u5bb9\uff1a')
         ]
         assert len(content_logs) == 1
-        assert '\u5ba2\u6237\u9700\u6c42/\u5907\u6ce8?\u6709\u9700\u8981\u4f1a\u8054\u7cfb' in content_logs[0]
+        assert '\u5ba2\u6237\u9700\u6c42/\u5907\u6ce8\uff1a\u6709\u9700\u8981\u4f1a\u8054\u7cfb' in content_logs[0]
         assert result['success'] is False
         assert result['targets']['customer']['success'] is False
         assert result['targets']['shop']['success'] is True

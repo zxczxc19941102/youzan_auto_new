@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """CRM API payload and live-list verification regressions."""
+import datetime as _dt
 import json
 import sys
 import threading
@@ -14,6 +15,7 @@ import config  # noqa: E402
 
 CUST_LABEL = ''.join(chr(n) for n in (23458,25143,38656,27714,47,22791,27880))
 DEFAULT_REMARK = ''.join(chr(n) for n in (26377,38656,35201,20250,32852,31995))
+TEST_DATE = _dt.date.today().isoformat()
 
 
 class FakePage:
@@ -60,12 +62,12 @@ class CrmApiTests(unittest.TestCase):
     def test_verify_saved_requires_date_and_remark(self):
         row = {
             'id': 456,
-            'createdTime': '2026-10-30 14:00:00',
-            'visitTime': '2026-10-30 00:00:00',
+            'createdTime': TEST_DATE + ' 14:00:00',
+            'visitTime': TEST_DATE + ' 00:00:00',
             'resourceIds': [123],
             'visitContent': {CUST_LABEL: DEFAULT_REMARK},
         }
-        client = CrmApiClient(FakePage([{'code': 0, 'data': {'items': [row], 'total': 1}}]), 'customer')
+        client = CrmApiClient(FakePage([{'code': 0, 'data': {'items': [row], 'total': 1}}] * 8), 'customer')
         result = client.verify_saved({'opportunityId': 123})
         self.assertTrue(result['verified'])
         self.assertTrue(result['date_ok'])
@@ -75,8 +77,8 @@ class CrmApiTests(unittest.TestCase):
     def test_verify_saved_polls_eventual_consistency_without_resubmit(self):
         row = {
             'id': 567,
-            'createdTime': '2026-10-30 14:00:00',
-            'visitTime': '2026-10-30 00:00:00',
+            'createdTime': TEST_DATE + ' 14:00:00',
+            'visitTime': TEST_DATE + ' 00:00:00',
             'resourceIds': [123],
             'visitContent': {CUST_LABEL: DEFAULT_REMARK},
         }
