@@ -106,8 +106,8 @@ Install the build dependency into `.venv` and run the build script:
 The script:
 
 - builds a single-file GUI executable with PyInstaller;
-- uses UPX for compressible native components and the final executable;
-- copies `project_config.json` beside the executable;
+- uses UPX only for supported native components (not forced compression of the final onefile EXE);
+- embeds non-sensitive runtime defaults; copying only the EXE works without an external config;
 - applies a locally generated Authenticode self-signature for test use;
 - prints the SHA-256 hash and signature status.
 
@@ -144,3 +144,23 @@ Ignored local data may be removed when it is no longer needed:
 - `__pycache__/`: Python cache files.
 
 Do not delete `json/local_config.json`, `json/cookies.json` or `json/auth_state.json` unless you intentionally want to clear local login state and saved settings.
+
+### Portable startup / compatibility build
+
+Use Windows x64 with Microsoft Edge installed. No system Python or copied `.venv` is required by the EXE. Run as a normal user in a writable folder. Do not copy local credentials, cookies or `auth_state.json` between computers. DPAPI-protected passwords must be re-entered on the new computer.
+
+Build a separately signed, non-UPX compatibility executable for comparison:
+
+```powershell
+.\build-exe.ps1 -SkipUpx -BuildName YouzanAuto-Compatibility
+```
+
+Startup-only diagnostic (hidden GUI and local Edge test, no login or submission):
+
+```powershell
+$p = Start-Process .\YouzanAuto.exe -ArgumentList "--startup-check", "--check-browser" -PassThru -Wait
+$p.ExitCode
+Get-Content .\LOG\startup_check.json
+```
+
+Uncaught Python startup errors show a native dialog and write `LOG/startup_error.log`. If the EXE folder is not writable, the error log falls back to `%LOCALAPPDATA%/YouzanAuto/LOG/`. Loader, security-policy and pre-Python extraction failures may occur before Python diagnostics can run; collect the original Windows dialog/security history in that case. The signature is self-signed and is not automatically trusted on another PC.

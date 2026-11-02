@@ -31,24 +31,25 @@ _HERE = (
     if getattr(sys, 'frozen', False)
     else os.path.dirname(os.path.abspath(__file__))
 )
+from pathlib import Path
+from startup_support import (
+    RUNTIME_DEFAULTS, install_startup_diagnostics, load_runtime_config,
+    report_startup_error,
+)
+
+if getattr(sys, 'frozen', False):
+    install_startup_diagnostics(Path(_HERE))
 _RUNTIME_CONFIG_FILE = os.path.join(_HERE, 'project_config.json')
-_RUNTIME_DEFAULTS = {
-    'venv_dir': '.venv',
-    'python_executable_windows': os.path.join('Scripts', 'python.exe'),
-    'python_executable_posix': os.path.join('bin', 'python'),
-}
+_RUNTIME_DEFAULTS = dict(RUNTIME_DEFAULTS)
 try:
-    with open(_RUNTIME_CONFIG_FILE, 'r', encoding='utf-8') as _handle:
-        _RUNTIME_CONFIG = dict(_RUNTIME_DEFAULTS)
-        _RUNTIME_CONFIG.update(json.load(_handle))
-except FileNotFoundError as _exc:
-    raise SystemExit(
-        'Project runtime config is missing: %s; restore project_config.json and retry' % _RUNTIME_CONFIG_FILE
+    _RUNTIME_CONFIG, _RUNTIME_CONFIG_SOURCE = load_runtime_config(
+        Path(_HERE), frozen=bool(getattr(sys, 'frozen', False)),
+        bundle_dir=Path(getattr(sys, '_MEIPASS', _HERE)),
     )
-except (OSError, ValueError, TypeError) as _exc:
-    raise SystemExit(
-        'Project runtime config project_config.json could not be read: %s' % _exc
-    )
+except RuntimeError as _exc:
+    if getattr(sys, 'frozen', False):
+        report_startup_error(Path(_HERE), type(_exc), _exc, _exc.__traceback__)
+    raise SystemExit(str(_exc)) from _exc
 
 def _project_relative_path(value, default):
     value = str(value or default)
@@ -993,13 +994,16 @@ def on_close():
         pass
 
 
-def run_gui():
+def run_gui(startup_check=False):
     global root, entry_user, entry_pwd, entry_code, log_widget
     global btn_start, btn_submit, btn_ck, btn_stop
     global auto_shop_list_var, auto_fill_all_var, fill_all_dry_var, worker_count_var
     global followup_clue_var, followup_customer_var, followup_shop_var
     global proxy_server_var
     root = tk.Tk()
+    if startup_check:
+        root.withdraw()
+    root.report_callback_exception = sys.excepthook
     root.title('有赞后台自动登录（滑块+短信+抓CK）')
     root.geometry('760x700')
 
@@ -1098,7 +1102,11 @@ def run_gui():
     log('日志文件：%s' % _ensure_log_file())
     if config.LOCAL_PASSWORD_MIGRATION_REQUIRED:
         log_error('\u672c\u5730\u65e7\u7248\u660e\u6587\u5bc6\u7801\u4e0d\u4f1a\u81ea\u52a8\u4f7f\u7528\uff1b\u8bf7\u91cd\u65b0\u8f93\u5165\u5bc6\u7801\uff0c\u767b\u5f55\u6210\u529f\u540e\u5c06\u4ee5 Windows DPAPI \u4fdd\u62a4\u4fdd\u5b58')
+    if startup_check:
+        root.after(200, root.quit)
     root.mainloop()
+    if startup_check:
+        root.destroy()
     try:
         if _LOG_FILE['handle'] is not None:
             _LOG_FILE['handle'].close()
@@ -1306,7 +1314,61 @@ def run_list_shops_cli():
             pass
 
 
+def run_startup_check(check_browser=False):
+    """Exercise packaged dependencies and actual hidden GUI without logging in."""
+    import io
+    import platform
+    import numpy as np
+    from PIL import Image
+    from crm_api import CrmApiClient
+    from crm_followup_batch import CrmFollowupBatch
+    from crm_list_reader import CrmListReader
+
+    report = {
+        'frozen': bool(getattr(sys, 'frozen', False)),
+        'python': platform.python_version(),
+        'architecture': platform.machine(),
+        'runtime_config_source': _RUNTIME_CONFIG_SOURCE,
+        'image_ok': False, 'numpy_ok': False, 'gui_ok': False,
+        'browser_checked': bool(check_browser), 'browser_ok': None,
+    }
+    config.ensure_dirs()
+    output = Path(config.LOG_DIR) / 'startup_check.json'
+    try:
+        buffer = io.BytesIO()
+        Image.new('RGB', (8, 8), 'white').save(buffer, format='PNG')
+        buffer.seek(0)
+        with Image.open(buffer) as image:
+            image.verify()
+        report['image_ok'] = True
+        report['numpy_ok'] = int(np.arange(4).sum()) == 6
+        run_gui(startup_check=True)
+        report['gui_ok'] = bool(entry_user is not None and entry_pwd is not None)
+        if check_browser:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(channel=config.BROWSER_CHANNEL, headless=True)
+                try:
+                    page = browser.new_page()
+                    page.set_content('<title>YouzanAuto startup check</title>')
+                    report['browser_ok'] = page.title() == 'YouzanAuto startup check'
+                finally:
+                    browser.close()
+        report['success'] = bool(
+            report['image_ok'] and report['numpy_ok'] and report['gui_ok']
+            and (not check_browser or report['browser_ok'])
+        )
+        return report['success']
+    except Exception as exc:
+        report.update(success=False, error_type=type(exc).__name__, error=str(exc))
+        return False
+    finally:
+        output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
 if __name__ == '__main__':
+    if '--startup-check' in sys.argv:
+        raise SystemExit(0 if run_startup_check('--check-browser' in sys.argv) else 1)
     _skip = 0
     if '--skip' in sys.argv:
         try:
