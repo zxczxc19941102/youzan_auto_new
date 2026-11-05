@@ -22,7 +22,6 @@ Windows GUI automation tool for logging in to Youzan, reading the current user's
 - Python 3.12 or a compatible Python version supported by the dependencies.
 - Microsoft Edge installed.
 - Network access to the authorized Youzan account.
-- Optional: a local proxy configured through the GUI or environment variables.
 
 ## First-time setup from source
 
@@ -44,19 +43,18 @@ To start explicitly with the project interpreter:
 
 ## Local configuration and sensitive data
 
-The application creates local runtime files under `json/`, `LOG/`, `html/`, `txt/` and `png/`. These directories are intentionally ignored by Git.
+At runtime, the project root is limited to these application outputs:
 
-Do not put real credentials in source files, README files, tests, screenshots, logs or issue reports. The application can read credentials from the local GUI configuration or from environment variables:
+- `config.ini`: local account and menu settings; ignored by Git.
+- `log/`: runtime logs and failure diagnostics; ignored by Git.
 
-```powershell
-$env:YOUZAN_USER = 'your-account'
-$env:YOUZAN_PASSWORD = 'your-password'
-$env:YOUZAN_PROXY_SERVER = 'http://your-proxy:port'
-```
+The application no longer creates or uses separate `json/`, `html/`, `txt/`, `png/` or proxy-setting output directories. Existing legacy directories from older versions are not read by the current runtime.
 
-The example values above are placeholders only. Never commit real values.
+Do not put real credentials in source files, README files, tests, screenshots, logs or issue reports. After a successful login, the GUI writes all menu states as lowercase `true`/`false` values to `config.ini`.
 
-The local configuration file stores the password in Windows DPAPI-protected form. If the file is missing or cannot be decrypted, enter the credentials again in the GUI. Local cookies and complete browser session state are also excluded from Git.
+The password is stored as `dpapi:<base64>` using Windows DPAPI, bound to the current Windows user profile. The plaintext password is never written to `config.ini`, and a ciphertext copied to another Windows user cannot be decrypted. If `config.ini` is missing or decryption fails, enter the credentials again in the GUI.
+
+The application automatically loads `config.ini` on startup and fills the account/password controls after the controls are initialized, then performs a read-back equality check.
 
 ## Login behavior
 

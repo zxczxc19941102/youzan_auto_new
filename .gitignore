@@ -13,6 +13,8 @@ __pycache__/
 json/cookies.json
 json/auth_state.json
 json/local_config.json
+config.ini
+log/
 
 # Runtime artifacts and diagnostics
 html/

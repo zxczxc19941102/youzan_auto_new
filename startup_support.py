@@ -51,7 +51,7 @@ def report_startup_error(app_dir: Path, exc_type: type, exc: BaseException, tb: 
         bases.append(Path(fallback) / 'YouzanAuto')
     for base in bases:
         try:
-            folder = base / 'LOG'
+            folder = base / 'log'
             folder.mkdir(parents=True, exist_ok=True)
             error_path = folder / 'startup_error.log'
             with error_path.open('a', encoding='utf-8') as handle:

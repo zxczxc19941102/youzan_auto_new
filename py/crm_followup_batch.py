@@ -13,13 +13,12 @@ from task_runtime import TaskCancelled
 
 
 class CrmFollowupBatch:
-    def __init__(self, bot, target_kind, raw_log, styled_log, debug_log, dry_run=False, runtime=None):
+    def __init__(self, bot, target_kind, raw_log, styled_log, debug_log, runtime=None):
         self.bot = bot
         self.target_kind = target_kind
         self.raw = raw_log
         self.styled = styled_log
         self.debug = debug_log
-        self.dry_run = bool(dry_run)
         self.runtime = runtime
         self.stop_event = runtime.stop_event if runtime is not None else threading.Event()
         self.total_targets = 0
@@ -170,7 +169,6 @@ class CrmFollowupBatch:
             case = ShopFollowupCase(
                 SimpleNamespace(page=page),
                 self.debug,
-                dry_run=self.dry_run,
                 shop_id=item_id,
                 detail_url=detail_url,
                 run_id='%s_%s_%02d' % (self.target_kind, time.strftime('%Y%m%d_%H%M%S'), position),
@@ -180,7 +178,7 @@ class CrmFollowupBatch:
             )
             result = case.run()
             if result.get('success'):
-                self._log('\u6210\u529f \u6761\u76ee%sID=%s%s' % (label, item_id, '\uff08\u4ec5\u586b\u5199\u672a\u53d1\u5e03\uff09' if self.dry_run else ''), 'success')
+                self._log('\u6210\u529f \u6761\u76ee%sID=%s%s' % (label, item_id), 'success')
                 self.results.append({'success': True, 'item_id': item_id, 'result': result})
                 if inline:
                     self._close_inline_form()
@@ -210,15 +208,13 @@ class CrmFollowupBatch:
         if not targets:
             self._log('%s\u6ca1\u6709\u53ef\u586b\u5199\u7684\u8ddf\u8fdb\u8bb0\u5f55' % self.target_kind)
             return {'attempted': 0, 'success': 0, 'failed': 0, 'cancelled': 0}
-        self._log('\u5f00\u59cb\u586b\u5199%s\u8ddf\u8fdb\u8bb0\u5f55\uff0c\u5171%d\u6761%s' % (
-            self.target_kind, len(targets), '\uff08\u8bd5\u8fd0\u884c\uff0c\u4e0d\u70b9\u51fb\u53d1\u5e03\uff09' if self.dry_run else ''
-        ))
+        self._log('\u5f00\u59cb\u586b\u5199%s\u8ddf\u8fdb\u8bb0\u5f55\uff0c\u5171%d\u6761' % (self.target_kind, len(targets)))
         for position, item in enumerate(targets, 1):
             self._check()
             self.progress_position = position
             self._fill_one(item, position)
             if position < len(targets):
-                self.stop_event.wait(0.2 if self.dry_run else config.FOLLOWUP_PUBLISH_INTERVAL_SECONDS)
+                self.stop_event.wait(config.FOLLOWUP_PUBLISH_INTERVAL_SECONDS)
         success = sum(1 for result in self.results if result.get('success'))
         failed = len(self.results) - success
         return {'attempted': len(targets), 'success': success, 'failed': failed, 'cancelled': 0, 'results': self.results}

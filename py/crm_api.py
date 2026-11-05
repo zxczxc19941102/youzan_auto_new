@@ -333,10 +333,10 @@ class CrmApiClient:
 
 
 class CrmApiFollowupBatch:
-    def __init__(self, bot, target_kind, log, debug=None, dry_run=False, runtime=None):
+    def __init__(self, bot, target_kind, log, debug=None, runtime=None):
         self.bot, self.target_kind, self.log = bot, target_kind, log
         self.debug = debug or (lambda message: None)
-        self.dry_run, self.runtime = bool(dry_run), runtime
+        self.runtime = runtime
         self.stop_event = runtime.stop_event if runtime is not None else None
         self.api = CrmApiClient(bot.page, target_kind, self.debug, self.stop_event)
         self.results = []
@@ -379,13 +379,14 @@ class CrmApiFollowupBatch:
         label = TARGET_API[self.target_kind]['label']
         progress_total = total
         self._log_progress(
-            '\u5f00\u59cb\u63a5\u53e3\u586b\u5199%s\u8ddf\u8fdb\u8bb0\u5f55\uff0c\u5171%d\u6761%s' % (
-                label, total, '\uff08\u8bd5\u8fd0\u884c\uff0c\u4e0d\u63d0\u4ea4\uff09' if self.dry_run else ''
+            '\u5f00\u59cb\u63a5\u53e3\u586b\u5199%s\u8ddf\u8fdb\u8bb0\u5f55\uff0c\u5171%d\u6761' % (
+                label, total
             ),
             1 if progress_total else 0, progress_total,
         )
         for position, item in enumerate(targets, 1):
             self._check()
+            next_interval = config.FOLLOWUP_PUBLISH_INTERVAL_SECONDS
             item_id = str(item.get('opportunityId') or item.get('id') or item.get('customerAlias') or item.get('bizCustomerIdAlias') or position)
             try:
                 if self._already_done(item):
@@ -394,44 +395,39 @@ class CrmApiFollowupBatch:
                         position, progress_total,
                     )
                     self.results.append({'success': True, 'skipped': True, 'item_id': item_id})
+                    # No write occurred: move to the next item using the short read-only interval.
+                    next_interval = config.FOLLOWUP_SKIP_INTERVAL_SECONDS
                 else:
                     request_body = self.api.build_payload(item)
-                    if self.dry_run:
-                        self._log_progress(
-                            '\u6210\u529f \u6761\u76ee%sID=%s\uff08\u63a5\u53e3\u8bd5\u8fd0\u884c\uff0c\u672a\u63d0\u4ea4\uff09' % (label, item_id),
-                            position, progress_total,
+                    response = self.api._fetch('POST', '/visit/save', request_body)
+                    if not self.api.is_success(response):
+                        raise CrmApiError(
+                            '原始响应=%s' % json.dumps(response, ensure_ascii=False),
+                            payload=response,
                         )
-                        self.results.append({'success': True, 'dry_run': True, 'item_id': item_id, 'request': request_body})
-                    else:
-                        response = self.api._fetch('POST', '/visit/save', request_body)
-                        if not self.api.is_success(response):
-                            raise CrmApiError(
-                                '原始响应=%s' % json.dumps(response, ensure_ascii=False),
-                                payload=response,
-                            )
-                        record_id = (response.get('data') or {}).get('visitRecordId')
-                        verification = self.api.verify_saved(
-                            item, expected_remark='\u6709\u9700\u8981\u4f1a\u8054\u7cfb', record_id=record_id
+                    record_id = (response.get('data') or {}).get('visitRecordId')
+                    verification = self.api.verify_saved(
+                        item, expected_remark='\u6709\u9700\u8981\u4f1a\u8054\u7cfb', record_id=record_id
+                    )
+                    if not verification.get('verified'):
+                        detail = '回查未确认：found=%s date_ok=%s remark_ok=%s' % (
+                            verification.get('found'), verification.get('date_ok'), verification.get('remark_ok')
                         )
-                        if not verification.get('verified'):
-                            detail = '回查未确认：found=%s date_ok=%s remark_ok=%s' % (
-                                verification.get('found'), verification.get('date_ok'), verification.get('remark_ok')
-                            )
-                            raise CrmApiError(
-                                '提交响应code=0，但%s；原始响应=%s' % (
-                                    detail, json.dumps(response, ensure_ascii=False)
-                                ),
-                                payload={'response': response, 'verification': verification},
-                            )
-                        self._log_progress(
-                            '\u6210\u529f \u6761\u76ee%sID=%s visitRecordId=%s\uff0c\u56de\u67e5\u901a\u8fc7'
-                            % (label, item_id, record_id or '-'),
-                            position, progress_total,
+                        raise CrmApiError(
+                            '提交响应code=0，但%s；原始响应=%s' % (
+                                detail, json.dumps(response, ensure_ascii=False)
+                            ),
+                            payload={'response': response, 'verification': verification},
                         )
-                        self.results.append({
-                            'success': True, 'item_id': item_id, 'visitRecordId': record_id,
-                            'response': response, 'verification': verification,
-                        })
+                    self._log_progress(
+                        '\u6210\u529f \u6761\u76ee%sID=%s visitRecordId=%s\uff0c\u56de\u67e5\u901a\u8fc7'
+                        % (label, item_id, record_id or '-'),
+                        position, progress_total,
+                    )
+                    self.results.append({
+                        'success': True, 'item_id': item_id, 'visitRecordId': record_id,
+                        'response': response, 'verification': verification,
+                    })
             except TaskCancelled: raise
             except Exception as exc:
                 self._log_progress(
@@ -439,7 +435,8 @@ class CrmApiFollowupBatch:
                     position, progress_total,
                 )
                 self.results.append({'success': False, 'item_id': item_id, 'error': str(exc)})
-            if position < len(targets): self._sleep(config.FOLLOWUP_PUBLISH_INTERVAL_SECONDS)
+            if position < len(targets):
+                self._sleep(next_interval)
         success = sum(1 for x in self.results if x.get('success'))
         capture_path = self.api.save_capture()
         return {'attempted': len(targets), 'total': total, 'success': success, 'failed': len(self.results)-success, 'skipped': sum(1 for x in self.results if x.get('skipped')), 'results': self.results, 'api_capture': self.api.capture(), 'api_capture_path': capture_path}

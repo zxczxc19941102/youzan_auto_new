@@ -63,7 +63,7 @@ class PortableStartupTests(unittest.TestCase):
                 path = report_startup_error(Path(temp), RuntimeError, RuntimeError('test startup failure'), None)
             self.assertIsNotNone(path)
             self.assertIn('RuntimeError: test startup failure', path.read_text(encoding='utf-8'))
-            self.assertEqual(path.parent.name, 'LOG')
+            self.assertEqual(path.parent.name.lower(), 'log')
 
 
 if __name__ == '__main__':

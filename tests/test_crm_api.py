@@ -126,7 +126,6 @@ class CrmApiTests(unittest.TestCase):
             target_kind='customer',
             log=output.append,
             runtime=runtime,
-            dry_run=False,
         )
         batch.api = FakeApi()
         original_interval = config.FOLLOWUP_PUBLISH_INTERVAL_SECONDS

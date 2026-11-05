@@ -20,7 +20,7 @@ from youzan_bot import YouzanBot
 
 class FollowupBatch:
     def __init__(
-        self, bot, raw_log, styled_log, debug_log, dry_run=False,
+        self, bot, raw_log, styled_log, debug_log,
         runtime=None, executor=None, publish_lock=None, publish_gate=None,
     ):
         self.bot = bot
@@ -28,7 +28,6 @@ class FollowupBatch:
         self.raw = raw_log
         self.styled = styled_log
         self.debug = debug_log
-        self.dry_run = dry_run
         self.runtime = runtime
         # The login worker and the follow-up workers must use different pools.
         # Reusing runtime.executor here would let a worker submit work to the
@@ -41,17 +40,13 @@ class FollowupBatch:
         # The product is intentionally single-threaded: one account fills and
         # publishes one follow-up record at a time.
         self.publish_lock = publish_lock
-        # Normal publishing uses one shared gate so adjacent publish clicks
-        # are separated by the configured minimum interval.  Dry-run mode
-        # must remain fast and does not click the publish button.
+        # Serialize real publishing and keep the configured safety interval.
         if publish_gate is not None:
             self.publish_gate = publish_gate
-        elif not dry_run:
+        else:
             self.publish_gate = PublishIntervalGate(
                 config.FOLLOWUP_PUBLISH_INTERVAL_SECONDS
             )
-        else:
-            self.publish_gate = None
         self.run_id = time.strftime('%Y%m%d_%H%M%S')
         self.reader = ShopListReader(
             bot, lambda message: None, debug=debug_log, runtime=runtime
@@ -134,7 +129,7 @@ class FollowupBatch:
         return shops
 
     def load_done_ids(self):
-        """读取当天已成功发布的店铺 ID；试运行和其他日期不计入。"""
+        """???????????? ID?"""
         done = set()
         today = time.strftime('%Y%m%d')
         for path in Path(config.TXT_DIR).glob('followup_batch_*.json'):
@@ -142,8 +137,6 @@ class FollowupBatch:
                 continue
             try:
                 data = json.loads(path.read_text(encoding='utf-8'))
-                if data.get('dry_run'):
-                    continue
                 for item in data.get('results', []):
                     if item.get('success') and item.get('shop_id'):
                         done.add(str(item['shop_id']))
@@ -154,7 +147,7 @@ class FollowupBatch:
                 continue
             try:
                 data = json.loads(path.read_text(encoding='utf-8'))
-                if data.get('dry_run') or not data.get('success'):
+                if not data.get('success'):
                     continue
                 shop_id = data.get('shop_id')
                 if shop_id:
@@ -244,7 +237,6 @@ class FollowupBatch:
                 case = ShopFollowupCase(
                     SimpleNamespace(page=page_obj),
                     self.debug,
-                    dry_run=self.dry_run,
                     shop_id=str(shop_id),
                     detail_url=detail_url,
                     run_id='%s_%02d' % (self.run_id, index),
@@ -358,7 +350,6 @@ class FollowupBatch:
                 'success': success,
                 'failed': failed,
                 'cancelled': cancelled,
-                'dry_run': self.dry_run,
                 'results': self.results,
             }, handle, ensure_ascii=False, indent=2)
 
@@ -435,7 +426,6 @@ class FollowupBatch:
             case = ShopFollowupCase(
                 SimpleNamespace(page=page),
                 self.debug,
-                dry_run=self.dry_run,
                 shop_id=str(shop.get('kdt_id') or shop.get('shop_id') or ''),
                 detail_url=detail_url,
                 run_id='%s_%02d' % (self.run_id, index),
@@ -474,7 +464,6 @@ class FollowupBatch:
             self._pace()   # 错峰启动浏览器，削掉并发启动的 CPU 尖峰
             bot = YouzanBot(
                 self.debug,
-                proxy_server=getattr(self.bot, 'proxy_server', None),
             )
             bot.bind_runtime(runtime)
             bot.stop_event = self.stop_event

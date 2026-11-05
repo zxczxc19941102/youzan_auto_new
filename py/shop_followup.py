@@ -222,7 +222,7 @@ class ShopFollowupCase:
     """指定店铺的跟进记录发布测试用例。"""
 
     def __init__(
-        self, bot, log, dry_run=False, shop_id=None, detail_url=None,
+        self, bot, log, shop_id=None, detail_url=None,
         run_id=None, runtime=None, publish_lock=None, publish_gate=None,
         start_at_form=False, record_label='\u5e97\u94fa',
     ):
@@ -236,7 +236,6 @@ class ShopFollowupCase:
             runtime.stop_event if runtime is not None
             else getattr(bot, 'stop_event', None)
         )
-        self.dry_run = dry_run
         self.start_at_form = bool(start_at_form)
         self.record_label = str(record_label or '\u5e97\u94fa')
         self.shop_id = shop_id or SHOP_ID
@@ -263,7 +262,6 @@ class ShopFollowupCase:
         self.api_path = ''
         self.result = {
             'success': False,
-            'dry_run': dry_run,
             'shop_id': self.shop_id,
             'shop_detail_url': self.detail_url,
         }
@@ -288,9 +286,9 @@ class ShopFollowupCase:
         if '\u8be6\u60c5' in name:
             return '%sID=%s' % (self.record_label, self.shop_id)
         if '\u8868\u5355' in name:
-            return '\u8bd5\u8fd0\u884c=%s %sID=%s' % (self.dry_run, self.record_label, self.shop_id)
+            return '%sID=%s' % (self.record_label, self.shop_id)
         if '\u53d1\u5e03' in name:
-            return '\u8bd5\u8fd0\u884c=%s' % self.dry_run
+            return '%sID=%s' % (self.record_label, self.shop_id)
         return '%sID=%s' % (self.record_label, self.shop_id)
 
     @staticmethod
@@ -362,11 +360,8 @@ class ShopFollowupCase:
                 self._step('\u6293\u53d6\u53f3\u4fa7\u94fe\u63a5\u4e0e\u529f\u80fd\u70b9', self.dump_detail)
             self._step('\u70b9\u51fb\u62dc\u8bbf\u5546\u5bb6\u6253\u5f00\u8868\u5355', self.open_followup)
             self._step('\u586b\u5199\u8ddf\u8fdb\u8868\u5355', self.fill_form)
-            if self.dry_run:
-                self._step('\u8bd5\u8fd0\u884c\u622a\u56fe', self.dry_screenshot)
-            else:
-                self._step('\u786e\u5b9a\u5e76\u53d1\u5e03', self.publish)
-                self._step('\u9a8c\u8bc1\u53d1\u5e03\u7ed3\u679c', self.verify)
+            self._step('\u786e\u5b9a\u5e76\u53d1\u5e03', self.publish)
+            self._step('\u9a8c\u8bc1\u53d1\u5e03\u7ed3\u679c', self.verify)
             self.result['success'] = True
         except Exception as exc:
             self.result['error'] = repr(exc)[:800]
@@ -943,12 +938,6 @@ class ShopFollowupCase:
         self._capture('followup_filled')
         return json.dumps(self.form_values, ensure_ascii=False)
 
-    def dry_screenshot(self):
-        self._capture('dry_run')
-        self.log('试运行模式：已填写表单但未点击发布')
-        return 'dry-run'
-
-    # ---------- 步骤 5：发布 ----------
     def _visible_button(self, name):
         buttons = self.page.get_by_role('button', name=name, exact=True)
         for index in range(buttons.count()):
@@ -1298,7 +1287,6 @@ class ShopFollowupCase:
                 ),
                 '店铺ID: %s' % self.shop_id,
                 '店铺详情: %s' % self.detail_url,
-                '试运行: %s' % self.dry_run,
                 '结果: %s' % ('SUCCESS' if self.result.get('success') else 'FAILED'),
                 '',
                 '步骤:',

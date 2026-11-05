@@ -35,9 +35,8 @@ QUIET_RUNTIME_STEPS = frozenset({
 
 
 class YouzanBot:
-    def __init__(self, log, proxy_server=None):
+    def __init__(self, log):
         self.log = log
-        self.proxy_server = (config.DEFAULT_PROXY_SERVER if proxy_server is None else str(proxy_server).strip())
         self.pw = None
         self.browser = None
         self.context = None
@@ -393,9 +392,6 @@ class YouzanBot:
         self.log('启动 Edge（%s）' % mode)
         self.pw = sync_playwright().start()
         launch_options = {'channel': config.BROWSER_CHANNEL, 'headless': config.HEADLESS}
-        if self.proxy_server:
-            launch_options['proxy'] = {'server': self.proxy_server}
-            self.log('\u6d4f\u89c8\u5668\u4f7f\u7528\u672c\u5730\u4ee3\u7406\uff1a%s' % self.proxy_server)
         self.browser = self.pw.chromium.launch(**launch_options)
         context_options = {'viewport': config.VIEWPORT}
         if storage_state:

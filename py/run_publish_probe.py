@@ -53,7 +53,6 @@ def main() -> int:
                 app_main.raw_log,
                 app_main.styled_log,
                 logger,
-                dry_run=False,
                 publish_gate=gate,
             )
             batch.reader = reader

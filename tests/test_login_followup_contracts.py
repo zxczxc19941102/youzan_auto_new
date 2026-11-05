@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Offline regression checks for login, proxy, and concise follow-up logging."""
 import sys
 import json
@@ -135,11 +135,9 @@ class RegressionTests:
         fake_pw = SimpleNamespace(chromium=chromium, stop=lambda: None)
         fake_sync = SimpleNamespace(start=lambda: fake_pw)
         with patch('youzan_bot.sync_playwright', return_value=fake_sync):
-            bot = YouzanBot(lambda _message: None,
-                            proxy_server='http://127.0.0.1:10808')
+            bot = YouzanBot(lambda _message: None)
             bot._ensure_browser()
-        assert chromium.launch_options['proxy']['server'] == \
-            'http://127.0.0.1:10808'
+        assert 'proxy' not in chromium.launch_options
         assert chromium.launch_options['headless'] is True
 
     @staticmethod
@@ -175,10 +173,14 @@ class RegressionTests:
 
     @staticmethod
     def start_login_forces_real_credential_validation():
+        instances = []
+
         class FakeBot:
-            def __init__(self, *_args, **_kwargs):
+            def __init__(self, log):
+                self.log = log
                 self.start_login_called = False
                 self.load_cookie_called = False
+                instances.append(self)
 
             def bind_runtime(self, _runtime):
                 pass
@@ -194,21 +196,104 @@ class RegressionTests:
             def close(self):
                 pass
 
-        fake_bot = FakeBot()
         old_flag = app_main.fresh_login_requested['v']
         try:
             app_main.fresh_login_requested['v'] = True
-            with patch.object(app_main, 'YouzanBot', return_value=fake_bot), \
+            with patch.object(app_main, 'YouzanBot', side_effect=FakeBot), \
                  patch.object(app_main, '_ck_token_exist', return_value=True), \
                  patch.object(app_main, '_make_debug_log', return_value=lambda _message: None), \
                  patch.object(app_main, 'log'), \
                  patch.object(app_main, '_auto_followup_after_login'):
-                result = app_main.login_worker('user', 'wrong-password', {'proxy_server': ''})
+                result = app_main.login_worker('user', 'wrong-password', {})
             assert result is False
-            assert fake_bot.start_login_called is True
-            assert fake_bot.load_cookie_called is False
+            assert instances[0].start_login_called is True
+            assert instances[0].load_cookie_called is False
         finally:
             app_main.fresh_login_requested['v'] = old_flag
+
+    @staticmethod
+    def credential_login_waits_for_sms_and_confirms_workbench():
+        calls = []
+
+        class FakeBot:
+            needs_sms = True
+
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def bind_runtime(self, _runtime):
+                pass
+
+            def start_login(self, user, password):
+                calls.append(('start_login', user, password))
+                return True
+
+            def send_sms(self):
+                calls.append(('send_sms',))
+                return True
+
+            def submit_code(self, code):
+                calls.append(('submit_code', code))
+                return True
+
+            def confirm_workbench(self, timeout=12):
+                calls.append(('confirm_workbench', timeout))
+                return True
+
+            def close(self):
+                calls.append(('close',))
+
+        old_runner = app_main.runner
+        old_flag = app_main.fresh_login_requested['v']
+        old_stop = app_main.stop_flag
+        try:
+            app_main.runner = None
+            app_main.fresh_login_requested['v'] = True
+            app_main.stop_flag = threading.Event()
+            with patch.object(app_main, 'YouzanBot', FakeBot), \
+                 patch.object(app_main, '_make_debug_log', return_value=lambda _message: None), \
+                 patch.object(app_main, '_wait_code_input', return_value='123456'), \
+                 patch.object(app_main, '_save_login_config'), \
+                 patch.object(app_main, '_auto_followup_after_login', return_value={'success': True}), \
+                 patch.object(app_main, 'log'):
+                result = app_main.login_worker('user', 'password', {})
+            assert result is True
+            assert ('start_login', 'user', 'password') in calls
+            assert ('send_sms',) in calls
+            assert ('submit_code', '123456') in calls
+            assert any(call[0] == 'confirm_workbench' for call in calls)
+            assert ('close',) in calls
+        finally:
+            app_main.runner = old_runner
+            app_main.fresh_login_requested['v'] = old_flag
+            app_main.stop_flag = old_stop
+
+    @staticmethod
+    def credential_login_failure_never_saves_or_runs_followup():
+        class RejectingBot:
+            needs_sms = False
+
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def bind_runtime(self, _runtime):
+                pass
+
+            def start_login(self, _user, _password):
+                return False
+
+            def close(self):
+                pass
+
+        with patch.object(app_main, 'YouzanBot', RejectingBot), \
+             patch.object(app_main, '_make_debug_log', return_value=lambda _message: None), \
+             patch.object(app_main, '_save_login_config') as save_config, \
+             patch.object(app_main, '_auto_followup_after_login') as followup, \
+             patch.object(app_main, 'log'):
+            result = app_main.login_worker('user', 'wrong-password', {})
+        assert result is False
+        save_config.assert_not_called()
+        followup.assert_not_called()
 
     @staticmethod
     def followup_server_warning_is_recorded_without_hiding_success():
@@ -231,7 +316,7 @@ class RegressionTests:
         assert case.server_warnings == [{
             'code': '4', 'message': '\u64cd\u4f5c\u592a\u5feb\uff0c\u53ef\u80fd\u4f1a\u51fa\u9519\u5662',
         }]
-        assert any('原始错误码=4' in message for message in messages)
+        assert any('鍘熷閿欒鐮?4' in message for message in messages)
 
     @staticmethod
     def root_server_error_is_preserved_verbatim():
@@ -335,13 +420,13 @@ class RegressionTests:
         batch.raw = messages.append
         batch.total_targets = 30
         batch.progress_position = 1
-        batch._note('成功 条目店铺ID=40785558')
+        batch._note('鎴愬姛 鏉＄洰搴楅摵ID=40785558')
         batch.progress_position = 2
-        batch._note('成功 条目店铺ID=44588156')
+        batch._note('鎴愬姛 鏉＄洰搴楅摵ID=44588156')
 
         assert messages == [
-            ('成功 条目店铺ID=40785558', 1, 30),
-            ('成功 条目店铺ID=44588156', 2, 30),
+            ('鎴愬姛 鏉＄洰搴楅摵ID=40785558', 1, 30),
+            ('鎴愬姛 鏉＄洰搴楅摵ID=44588156', 2, 30),
         ]
 
     @staticmethod
@@ -351,19 +436,9 @@ class RegressionTests:
             lambda _message: None,
             lambda *_args: None,
             lambda _message: None,
-            dry_run=False,
         )
         assert batch.publish_gate is not None
         assert batch.publish_gate.interval_seconds == 3.01
-        dry_batch = followup_batch.FollowupBatch(
-            SimpleNamespace(page=object()),
-            lambda _message: None,
-            lambda *_args: None,
-            lambda _message: None,
-            dry_run=True,
-        )
-        assert dry_batch.publish_gate is None
-
     @staticmethod
     def followup_toggle_waits_for_async_panel_and_clicks_dynamic_class():
         class FakeFormLocator:
@@ -414,10 +489,9 @@ class RegressionTests:
     def parallel_followup_logs_content_once_without_shop_details():
         messages = []
         batch = followup_batch.FollowupBatch.__new__(followup_batch.FollowupBatch)
-        batch.bot = SimpleNamespace(proxy_server='http://127.0.0.1:10808')
+        batch.bot = SimpleNamespace()
         batch.runtime = SimpleNamespace(emit=messages.append)
         batch.debug = lambda _message: None
-        batch.dry_run = False
         batch.publish_lock = threading.Lock()
         batch.run_id = 'test'
         batch.total_targets = 1
@@ -454,6 +528,10 @@ def main():
          RegressionTests.my_shops_navigation_is_a_real_click),
         ('real credential validation',
          RegressionTests.start_login_forces_real_credential_validation),
+        ('credential login confirms SMS and workbench',
+         RegressionTests.credential_login_waits_for_sms_and_confirms_workbench),
+        ('credential rejection blocks success side effects',
+         RegressionTests.credential_login_failure_never_saves_or_runs_followup),
         ('server warning recording',
          RegressionTests.followup_server_warning_is_recorded_without_hiding_success),
         ('root server error preserved',
