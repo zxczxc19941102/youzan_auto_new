@@ -692,53 +692,42 @@ def login_worker(user, pwd, settings):
 
 
 def _mfree_login_task(user, pwd, settings):
-    '''一键免密登录任务：验证工作台后再执行后续流程。'''
-
+    """Keep the saved-login session alive until follow-up completes."""
     global bot
     rt = runner
     b = None
     login_debug = _make_debug_log('login')
     try:
+        if stop_flag.is_set():
+            raise TaskCancelled()
         b = YouzanBot(login_debug)
         b.bind_runtime(rt)
         bot = b
-        ok = b.load_cookies_and_go() and b.confirm_workbench(timeout=2)
-        if not ok:
+        if not (b.load_cookies_and_go() and b.confirm_workbench(timeout=2)):
             fresh_login_requested['v'] = True
             log('免密登录未能确认进入工作台，请点「开始登录」')
-        try:
-            if b is not None:
-                b.close()
-        except Exception:
-            bot = None
             return False
-        else:
-            bot = None
+        fresh_login_requested['v'] = False
+        log('成功登录工作台')
+        _save_login_config(user, pwd, settings)
+        followup = _auto_followup_after_login(b, settings)
+        return bool(followup.get('success', True))
     except TaskCancelled:
         log('免密登录任务已终止')
+        return False
     except Exception as exc:
         fresh_login_requested['v'] = True
         safe_error = str(exc).replace(pwd, '***') if pwd else str(exc)
         log('免密登录失败：%s' % safe_error[:300])
-    while True:
-        try:
-            fresh_login_requested['v'] = False
-            log('成功登录工作台')
-            _save_login_config(user, pwd, settings)
-            followup = _auto_followup_after_login(b, settings)
-        except TaskCancelled:
-            log('免密登录任务已终止')
-        except Exception as exc:
-            fresh_login_requested['v'] = True
-            safe_error = str(exc).replace(pwd, '***') if pwd else str(exc)
-            log('免密登录失败：%s' % safe_error[:300])
+        return False
+    finally:
         try:
             if b is not None:
                 b.close()
         except Exception:
             pass
         bot = None
-        return bool(followup.get('success', True))
+
 
 def _mask_account(account):
     '''账号脱敏：保留前 3 位与后 4 位，短账号只保留首位。'''

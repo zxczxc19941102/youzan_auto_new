@@ -316,7 +316,7 @@ class RegressionTests:
         assert case.server_warnings == [{
             'code': '4', 'message': '\u64cd\u4f5c\u592a\u5feb\uff0c\u53ef\u80fd\u4f1a\u51fa\u9519\u5662',
         }]
-        assert any('鍘熷閿欒鐮?4' in message for message in messages)
+        assert any('\u539f\u59cb\u9519\u8bef\u7801=4' in message for message in messages)
 
     @staticmethod
     def root_server_error_is_preserved_verbatim():
@@ -459,8 +459,9 @@ class RegressionTests:
             def locator(self, _selector):
                 return FakeFormLocator(self)
 
-            def wait_for_function(self, _script, timeout=None):
+            def wait_for_function(self, _script, timeout=None, polling=None):
                 self.wait_timeout = timeout
+                self.wait_polling = polling
 
             def evaluate(self, script):
                 if 'SidePanel_toggle' in script:
@@ -479,14 +480,16 @@ class RegressionTests:
         case._capture = lambda _tag: None
         case._sleep = lambda _seconds: None
         case.stop_event = None
+        case.start_at_form = False
 
         assert case.open_followup() == 'form ready'
         assert page.clicked is True
-        assert page.wait_timeout == 30000
-        assert any('\u5c55\u5f00\u53f3\u4fa7\u8868\u5355' in message for message in messages)
+        assert page.wait_timeout == config.FOLLOWUP_FORM_TIMEOUT_MS
+        assert page.wait_polling == config.WAIT_POLLING_MS
+        assert any('\u6253\u5f00\u53f3\u4fa7\u8868\u5355' in message for message in messages)
 
     @staticmethod
-    def parallel_followup_logs_content_once_without_shop_details():
+    def parallel_followup_reports_result_once_without_content():
         messages = []
         batch = followup_batch.FollowupBatch.__new__(followup_batch.FollowupBatch)
         batch.bot = SimpleNamespace()
@@ -510,10 +513,11 @@ class RegressionTests:
             )
         text = '\n'.join(messages)
         assert result is True
-        assert text.count('```') == 2
-        assert text.count('\u8ddf\u8fdb\u5185\u5bb9\uff1a') == 1
-        assert '\u5fae\u4fe1' in text and '\u540e\u7eed\u56de\u8bbf' in text
+        assert text.count('```') == 0
+        assert '\u8ddf\u8fdb\u5185\u5bb9\uff1a' not in text
         assert 'PRIVATE_SHOP_NAME' not in text
+        assert len(messages) == 1
+        assert '\u6210\u529f' in text
         assert 'PRIVATE_SHOP_ID' in text
 
 
@@ -546,8 +550,8 @@ def main():
          RegressionTests.default_batch_uses_fixed_publish_interval),
         ('async follow-up panel toggle',
          RegressionTests.followup_toggle_waits_for_async_panel_and_clicks_dynamic_class),
-        ('parallel follow-up log content',
-         RegressionTests.parallel_followup_logs_content_once_without_shop_details),
+        ('quiet parallel follow-up result',
+         RegressionTests.parallel_followup_reports_result_once_without_content),
     ]
     failed = []
     for name, check in checks:
@@ -560,6 +564,11 @@ def main():
             print('PASS %s' % name)
     print('RESULT =', 'FAIL' if failed else 'PASS')
     return 1 if failed else 0
+
+
+def test_login_followup_contracts():
+    """Include the legacy script checks in pytest collection as well."""
+    assert main() == 0
 
 
 if __name__ == '__main__':

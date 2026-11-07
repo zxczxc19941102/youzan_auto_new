@@ -88,7 +88,13 @@ class CrmApiClient:
             }
         }'''
         last = None
-        attempts = max(1, int(config.CRM_API_RETRY_ATTEMPTS))
+        # Retry only reads, including the explicitly read-only POST endpoints.
+        # A timed-out save may already be committed; never blindly submit it again.
+        read_only = method.upper() in ('GET', 'HEAD') or (
+            method.upper() == 'POST'
+            and path in ('/resource/my/list', '/kaOpportunity/myOpportunities', '/visit/search')
+        )
+        attempts = max(1, int(config.CRM_API_RETRY_ATTEMPTS)) if read_only else 1
         for attempt in range(attempts):
             try:
                 result = self.page.evaluate(script, {'url': url, 'method': method, 'body': body, 'timeoutMs': int(config.CRM_API_REQUEST_TIMEOUT_MS)})
