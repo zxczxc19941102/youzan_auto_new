@@ -1,197 +1,126 @@
-# -*- coding: utf-8 -*-
-"""全局配置：URL、文件路径、默认账号、浏览器参数。集中修改，避免散落在各模块。"""
 import base64
+import configparser
 import ctypes
-import json
 import os
-import tempfile
-import time
 import sys
+import time
 from ctypes import wintypes
 
-# 目录（config.py 在 py/ 下，项目根目录是它的上一级）
-BASE_DIR = (
-    os.path.dirname(os.path.abspath(sys.executable))
-    if getattr(sys, 'frozen', False)
-    else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-)
-PROJECT_CONFIG_FILE = os.path.join(BASE_DIR, 'project_config.json')
-PY_DIR = os.path.join(BASE_DIR, 'py')
-JSON_DIR = os.path.join(BASE_DIR, 'json')
-HTML_DIR = os.path.join(BASE_DIR, 'html')
-TXT_DIR = os.path.join(BASE_DIR, 'txt')
-PNG_DIR = os.path.join(BASE_DIR, 'png')
-LOG_DIR = os.path.join(BASE_DIR, 'LOG')   # 运行日志实时落盘目录（TXT）
+BASE_DIR = (os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, "frozen", False)
+            else os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROJECT_CONFIG_FILE = os.path.join(BASE_DIR, "project_config.json")
+LOCAL_CONFIG_FILE = os.path.join(BASE_DIR, "config.ini")
+LOG_DIR = os.path.join(BASE_DIR, "log")
+JSON_DIR = HTML_DIR = TXT_DIR = PNG_DIR = LOG_DIR
+PY_DIR = os.path.join(BASE_DIR, "py")
+COOKIE_FILE = os.path.join(LOG_DIR, "cookies.json")
+AUTH_FILE = os.path.join(LOG_DIR, "auth_state.json")
+SMS_CODE_FILE = os.path.join(LOG_DIR, "sms_code.txt")
 
-# 页面地址（登录成功后统一落到工作台）
 LOGIN_URL = 'https://account.youzan.com/login?redirectUrl=https://qudao.youzan.com#/workbench'
 TARGET_URL = 'https://qudao.youzan.com/#/workbench'
-
-# 落盘文件（CK / 完整登录态 / 短信码 / 页面源码）
-COOKIE_FILE = os.path.join(JSON_DIR, 'cookies.json')
-AUTH_FILE = os.path.join(JSON_DIR, 'auth_state.json')
-SMS_CODE_FILE = os.path.join(TXT_DIR, 'sms_code.txt')
-
-# 默认账号（可在界面里改）；凭据从环境变量读取，避免提交到仓库。
-# Local GUI settings. The file is ignored by Git and stays on this computer.
-LOCAL_CONFIG_FILE = os.path.join(JSON_DIR, 'local_config.json')
-
-
-LOCAL_CONFIG_LOAD_ERROR = ''
-LOCAL_CONFIG_EXISTS = os.path.exists(LOCAL_CONFIG_FILE)
-
-def _load_local_config():
-    global LOCAL_CONFIG_LOAD_ERROR
-    try:
-        with open(LOCAL_CONFIG_FILE, 'r', encoding='utf-8') as handle:
-            data = json.load(handle)
-        if not isinstance(data, dict):
-            LOCAL_CONFIG_LOAD_ERROR = 'local config must be a JSON object'
-            return {}
-        return data
-    except FileNotFoundError:
-        return {}
-    except (OSError, ValueError, TypeError) as exc:
-        LOCAL_CONFIG_LOAD_ERROR = str(exc)
-        return {}
-
+LOCAL_CONFIG_LOAD_ERROR = ""
+LOCAL_CONFIG_EXISTS = os.path.isfile(LOCAL_CONFIG_FILE)
+LOCAL_PASSWORD_MIGRATION_REQUIRED = False
 
 class _DataBlob(ctypes.Structure):
-    _fields_ = [
-        ('cbData', wintypes.DWORD),
-        ('pbData', ctypes.POINTER(ctypes.c_byte)),
-    ]
+    _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
 
-
-def _dpapi_transform(value, decrypt=False):
-    """Protect/unprotect a secret with Windows user-scoped DPAPI."""
-    if os.name != 'nt':
+def _dpapi_transform(value: bytes, decrypt: bool = False) -> bytes | None:
+    """Protect/unprotect secrets with Windows user-scoped DPAPI."""
+    if os.name != "nt":
         return None
-    raw = value if isinstance(value, bytes) else str(value).encode('utf-8')
-    input_buffer = ctypes.create_string_buffer(raw)
-    input_blob = _DataBlob(
-        len(raw), ctypes.cast(input_buffer, ctypes.POINTER(ctypes.c_byte))
-    )
-    output_blob = _DataBlob()
-    if decrypt:
-        ok = ctypes.windll.crypt32.CryptUnprotectData(
-            ctypes.byref(input_blob), None, None, None, None, 0,
-            ctypes.byref(output_blob)
-        )
-    else:
-        ok = ctypes.windll.crypt32.CryptProtectData(
-            ctypes.byref(input_blob), None, None, None, None, 0,
-            ctypes.byref(output_blob)
-        )
-    if not ok:
+    raw = value if isinstance(value, bytes) else str(value).encode("utf-8")
+    source = ctypes.create_string_buffer(raw)
+    blob = _DataBlob(len(raw), ctypes.cast(source, ctypes.POINTER(ctypes.c_byte)))
+    output = _DataBlob()
+    api = ctypes.windll.crypt32.CryptUnprotectData if decrypt else ctypes.windll.crypt32.CryptProtectData
+    if not api(ctypes.byref(blob), None, None, None, None, 0, ctypes.byref(output)):
         return None
     try:
-        return ctypes.string_at(output_blob.pbData, output_blob.cbData)
+        return ctypes.string_at(output.pbData, output.cbData)
     finally:
-        ctypes.windll.kernel32.LocalFree(output_blob.pbData)
+        ctypes.windll.kernel32.LocalFree(output.pbData)
 
-
-def _protect_password(password):
-    protected = _dpapi_transform(password, decrypt=False)
-    if protected is None:
-        raise RuntimeError('Windows DPAPI password protection failed')
-    return 'dpapi:' + base64.b64encode(protected).decode('ascii')
-
-
-def _unprotect_password(value):
-    if not value:
-        return ''
-    if not str(value).startswith('dpapi:'):
-        # Never treat legacy plaintext configuration as a usable credential.
-        # The GUI asks the user to re-enter it; the normal save path uses DPAPI.
-        return ''
-    try:
-        protected = base64.b64decode(str(value)[6:])
-        raw = _dpapi_transform(protected, decrypt=True)
-        return raw.decode('utf-8') if raw is not None else ''
-    except (ValueError, TypeError, UnicodeError):
-        return ''
-
-
-def _as_bool(value, default=False):
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in ('1', 'true', 'yes', 'on', 'y')
+def _protect_password(password: str) -> str:
+    """Encrypt a password with current-Windows-user DPAPI."""
+    value = _dpapi_transform(str(password).encode("utf-8"))
     if value is None:
-        return default
-    return bool(value)
+        raise RuntimeError("Windows DPAPI password encryption failed; credentials were not saved")
+    return "dpapi:" + base64.b64encode(value).decode("ascii")
 
+def _unprotect_password(value: str) -> str:
+    """Decrypt a DPAPI value, rejecting plaintext and invalid ciphertext."""
+    if not value or not value.startswith("dpapi:"):
+        return ""
+    try:
+        raw = _dpapi_transform(base64.b64decode(value[6:], validate=True), decrypt=True)
+        return raw.decode("utf-8") if raw is not None else ""
+    except (ValueError, TypeError, UnicodeError):
+        return ""
+
+def _load_local_config() -> configparser.ConfigParser:
+    """Load the root INI without creating startup artifacts."""
+    global LOCAL_CONFIG_LOAD_ERROR
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        if os.path.isfile(LOCAL_CONFIG_FILE):
+            with open(LOCAL_CONFIG_FILE, "r", encoding="utf-8-sig") as stream:
+                parser.read_file(stream)
+    except (OSError, configparser.Error) as exc:
+        LOCAL_CONFIG_LOAD_ERROR = str(exc)
+    return parser
 
 _LOCAL_CONFIG = _load_local_config()
+def _get_bool(key: str, default: bool) -> bool:
+    try:
+        return _LOCAL_CONFIG.getboolean("menu", key, fallback=default)
+    except (ValueError, configparser.Error):
+        return default
 
-# Environment variables take precedence over the saved local settings.
-DEFAULT_USER = os.environ.get('YOUZAN_USER') or str(_LOCAL_CONFIG.get('username', ''))
-_LOCAL_PASSWORD_VALUE = _LOCAL_CONFIG.get(
-    'password_protected', _LOCAL_CONFIG.get('password', '')
-)
-_PASSWORD_FROM_ENV = os.environ.get('YOUZAN_PASSWORD')
-LOCAL_PASSWORD_MIGRATION_REQUIRED = bool(
-    not _PASSWORD_FROM_ENV
-    and _LOCAL_PASSWORD_VALUE
-    and not str(_LOCAL_PASSWORD_VALUE).startswith('dpapi:')
-)
-DEFAULT_PWD = _PASSWORD_FROM_ENV or _unprotect_password(_LOCAL_PASSWORD_VALUE)
-DEFAULT_AUTO_SHOP_LIST = _as_bool(_LOCAL_CONFIG.get('auto_shop_list'), True)
-DEFAULT_AUTO_FILL_ALL = _as_bool(_LOCAL_CONFIG.get('auto_fill_all'), True)
-DEFAULT_FILL_ALL_DRY = _as_bool(_LOCAL_CONFIG.get('fill_all_dry'), False)
-# Follow-up publishing is intentionally serialized.  The server-side flow is
-# safer and more predictable when one account sends one record at a time.
+DEFAULT_USER = os.environ.get("YOUZAN_USER") or _LOCAL_CONFIG.get("credentials", "username", fallback="")
+_ciphertext = _LOCAL_CONFIG.get("credentials", "password_protected", fallback="")
+DEFAULT_PWD = os.environ.get("YOUZAN_PASSWORD") or _unprotect_password(_ciphertext)
+DEFAULT_AUTO_SHOP_LIST = _get_bool("auto_shop_list", True)
+DEFAULT_AUTO_FILL_ALL = _get_bool("auto_fill_all", True)
+DEFAULT_FOLLOWUP_CLUE = _get_bool("followup_clue", False)
+DEFAULT_FOLLOWUP_CUSTOMER = _get_bool("followup_customer", False)
+DEFAULT_FOLLOWUP_SHOP = _get_bool("followup_shop", True)
 FOLLOWUP_CONCURRENCY_ENABLED = False
 FOLLOWUP_MAX_WORKERS = 1
 FOLLOWUP_PUBLISH_INTERVAL_SECONDS = 3.01
-DEFAULT_PROXY_SERVER = (
-    os.environ.get('YOUZAN_PROXY_SERVER')
-    or str(_LOCAL_CONFIG.get('proxy_server') or 'http://127.0.0.1:10808').strip()
-)
-try:
-    DEFAULT_WORKERS = (
-        1 if not FOLLOWUP_CONCURRENCY_ENABLED
-        else max(1, min(FOLLOWUP_MAX_WORKERS, int(_LOCAL_CONFIG.get('workers', 1))))
-    )
-except (TypeError, ValueError):
-    DEFAULT_WORKERS = 1
+# Read-only duplicate skips do not use the write throttle.
+FOLLOWUP_SKIP_INTERVAL_SECONDS = 1.0
+CRM_FOLLOWUP_MODE = _LOCAL_CONFIG.get("execution", "crm_followup_mode", fallback="api").strip().lower()
+CRM_API_RETRY_ATTEMPTS = 2
+CRM_API_PAGE_SIZE = 100
+CRM_API_REQUEST_TIMEOUT_MS = 20000
+CRM_API_SKIP_TODAY_DUPLICATES = True
+CRM_API_VERIFY_ATTEMPTS = 8
+CRM_API_VERIFY_POLL_SECONDS = 0.75
+DEFAULT_WORKERS = 1
 
-
-def save_local_config(username, password, auto_shop_list=True,
-                      auto_fill_all=True, fill_all_dry=False, workers=1,
-                      proxy_server=None):
-    """Atomically save ignored local GUI settings."""
-    ensure_dirs()
-    payload = {
-        'username': str(username or ''),
-        'password_protected': _protect_password(password or ''),
-        'auto_shop_list': bool(auto_shop_list),
-        'auto_fill_all': bool(auto_fill_all),
-        'fill_all_dry': bool(fill_all_dry),
-        'workers': (
-            1 if not FOLLOWUP_CONCURRENCY_ENABLED
-            else max(1, min(FOLLOWUP_MAX_WORKERS, int(workers)))
-        ),
-        'proxy_server': str(proxy_server or DEFAULT_PROXY_SERVER).strip(),
-    }
-    fd, temp_path = tempfile.mkstemp(
-        prefix='.local_config_', suffix='.tmp', dir=JSON_DIR
-    )
+def save_local_config(username: str, password: str, auto_shop_list: bool = True,
+                      auto_fill_all: bool = True, followup_clue: bool = False,
+                      followup_customer: bool = False, followup_shop: bool = True,
+                      crm_followup_mode: str | None = None) -> None:
+    """Persist account and all menu states in config.ini; password is DPAPI protected."""
+    parser = configparser.ConfigParser(interpolation=None)
+    parser["credentials"] = {"username": str(username or ""),
+                             "password_protected": _protect_password(password or "")}
+    parser["menu"] = {name: str(bool(value)).lower() for name, value in {
+        "auto_shop_list": auto_shop_list, "auto_fill_all": auto_fill_all,
+        "followup_clue": followup_clue, "followup_customer": followup_customer,
+        "followup_shop": followup_shop,
+    }.items()}
+    parser["execution"] = {"workers": "1", "crm_followup_mode":
+                           str(crm_followup_mode or CRM_FOLLOWUP_MODE).strip().lower()}
+    with open(LOCAL_CONFIG_FILE, "w", encoding="utf-8", newline="") as stream:
+        parser.write(stream)
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-            handle.write('\n')
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_path, LOCAL_CONFIG_FILE)
-    finally:
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
-
+        os.chmod(LOCAL_CONFIG_FILE, 0o600)
+    except OSError:
+        pass
 
 HEADLESS = True                 # True=后台无浏览器窗口；False=弹窗调试用
 BROWSER_CHANNEL = 'msedge'      # 复用系统 Edge，免下载 chromium
@@ -202,6 +131,9 @@ ACTION_TIMEOUT_MS = 20000       # 单次点击/填表/等待元素
 NAV_TIMEOUT_MS = 45000          # 页面跳转
 DETAIL_NAV_TIMEOUT_MS = 30000   # 店铺详情（hash 路由，commit 即返回更快）
 ASSERT_TIMEOUT_MS = 15000       # 断言类等待（wait_for_function / load_state）
+# Conservative Playwright polling prevents long DOM waits from saturating CPU.
+WAIT_POLLING_MS = 250
+CAPTCHA_WAIT_POLLING_MS = 180
 FOLLOWUP_FORM_TIMEOUT_MS = 30000  # async follow-up panel/form render timeout
 
 # Login speed tuning. Prefer DOM/network readiness over fixed sleeps.
@@ -233,9 +165,8 @@ SAVE_STEP_SCREENSHOTS = False
 
 
 def ensure_dirs():
-    """确保所有归档目录存在；写入文件前调用，避免目录被手工删除后报错。"""
-    for folder in (JSON_DIR, HTML_DIR, TXT_DIR, PNG_DIR, LOG_DIR):
-        os.makedirs(folder, exist_ok=True)
+    """Create only the permitted runtime log directory."""
+    os.makedirs(LOG_DIR, exist_ok=True)
 
 
 def timestamped_path(folder, prefix, ext):

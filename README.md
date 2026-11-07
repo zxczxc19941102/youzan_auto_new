@@ -22,7 +22,6 @@ Windows GUI automation tool for logging in to Youzan, reading the current user's
 - Python 3.12 or a compatible Python version supported by the dependencies.
 - Microsoft Edge installed.
 - Network access to the authorized Youzan account.
-- Optional: a local proxy configured through the GUI or environment variables.
 
 ## First-time setup from source
 
@@ -44,19 +43,18 @@ To start explicitly with the project interpreter:
 
 ## Local configuration and sensitive data
 
-The application creates local runtime files under `json/`, `LOG/`, `html/`, `txt/` and `png/`. These directories are intentionally ignored by Git.
+At runtime, the project root is limited to these application outputs:
 
-Do not put real credentials in source files, README files, tests, screenshots, logs or issue reports. The application can read credentials from the local GUI configuration or from environment variables:
+- `config.ini`: local account and menu settings; ignored by Git.
+- `log/`: runtime logs and failure diagnostics; ignored by Git.
 
-```powershell
-$env:YOUZAN_USER = 'your-account'
-$env:YOUZAN_PASSWORD = 'your-password'
-$env:YOUZAN_PROXY_SERVER = 'http://your-proxy:port'
-```
+The application no longer creates or uses separate `json/`, `html/`, `txt/`, `png/` or proxy-setting output directories. Existing legacy directories from older versions are not read by the current runtime.
 
-The example values above are placeholders only. Never commit real values.
+Do not put real credentials in source files, README files, tests, screenshots, logs or issue reports. After a successful login, the GUI writes all menu states as lowercase `true`/`false` values to `config.ini`.
 
-The local configuration file stores the password in Windows DPAPI-protected form. If the file is missing or cannot be decrypted, enter the credentials again in the GUI. Local cookies and complete browser session state are also excluded from Git.
+The password is stored as `dpapi:<base64>` using Windows DPAPI, bound to the current Windows user profile. The plaintext password is never written to `config.ini`, and a ciphertext copied to another Windows user cannot be decrypted. If `config.ini` is missing or decryption fails, enter the credentials again in the GUI.
+
+The application automatically loads `config.ini` on startup and fills the account/password controls after the controls are initialized, then performs a read-back equality check.
 
 ## Login behavior
 
@@ -106,8 +104,8 @@ Install the build dependency into `.venv` and run the build script:
 The script:
 
 - builds a single-file GUI executable with PyInstaller;
-- uses UPX for compressible native components and the final executable;
-- copies `project_config.json` beside the executable;
+- uses UPX only for supported native components (not forced compression of the final onefile EXE);
+- embeds non-sensitive runtime defaults; copying only the EXE works without an external config;
 - applies a locally generated Authenticode self-signature for test use;
 - prints the SHA-256 hash and signature status.
 
@@ -144,3 +142,23 @@ Ignored local data may be removed when it is no longer needed:
 - `__pycache__/`: Python cache files.
 
 Do not delete `json/local_config.json`, `json/cookies.json` or `json/auth_state.json` unless you intentionally want to clear local login state and saved settings.
+
+### Portable startup / compatibility build
+
+Use Windows x64 with Microsoft Edge installed. No system Python or copied `.venv` is required by the EXE. Run as a normal user in a writable folder. Do not copy local credentials, cookies or `auth_state.json` between computers. DPAPI-protected passwords must be re-entered on the new computer.
+
+Build a separately signed, non-UPX compatibility executable for comparison:
+
+```powershell
+.\build-exe.ps1 -SkipUpx -BuildName YouzanAuto-Compatibility
+```
+
+Startup-only diagnostic (hidden GUI and local Edge test, no login or submission):
+
+```powershell
+$p = Start-Process .\YouzanAuto.exe -ArgumentList "--startup-check", "--check-browser" -PassThru -Wait
+$p.ExitCode
+Get-Content .\LOG\startup_check.json
+```
+
+Uncaught Python startup errors show a native dialog and write `LOG/startup_error.log`. If the EXE folder is not writable, the error log falls back to `%LOCALAPPDATA%/YouzanAuto/LOG/`. Loader, security-policy and pre-Python extraction failures may occur before Python diagnostics can run; collect the original Windows dialog/security history in that case. The signature is self-signed and is not automatically trusted on another PC.

@@ -48,7 +48,7 @@ def test_saved_credentials_are_written_and_read_back_from_controls():
 
 class FakeRepeatReader:
     def __init__(self, *_args, **_kwargs):
-        self.shops = [{'shop_id': '1'}]
+        self.shops = [{'shop_id': '1'}, {'shop_id': '2'}]
 
     def run(self):
         return {'success': True}
@@ -79,7 +79,7 @@ class FakeExecutor:
         pass
 
 
-def test_repeat_followup_asks_and_allows_explicit_continue():
+def test_repeat_followup_auto_skips_done_shops_without_popup():
     FakeRepeatBatch.last_run = None
     old_runner = main.runner
     try:
@@ -88,33 +88,80 @@ def test_repeat_followup_asks_and_allows_explicit_continue():
              patch.object(followup_batch_module, 'FollowupBatch', FakeRepeatBatch), \
              patch.object(main, 'DaemonThreadPoolExecutor', FakeExecutor), \
              patch.object(main, '_make_debug_log', lambda _name: (lambda _msg: None)), \
-             patch.object(main, '_confirm_repeat_followup', return_value=True):
+             patch.object(main, 'log') as log_mock:
             result = main._auto_followup_after_login(
                 object(), {'auto_shop_list': True, 'auto_fill_all': True, 'workers': 1}
             )
         assert result['success'] is True
         assert FakeRepeatBatch.last_run['skip_done'] is False
         assert FakeRepeatBatch.last_run['done_ids'] == set()
+        assert [shop['shop_id'] for shop in FakeRepeatBatch.last_run['shops']] == ['2']
+        assert any('\u4eca\u65e5\u5df2\u586b\u5199\u8ddf\u8fdb' in str(call.args[0]) for call in log_mock.call_args_list)
     finally:
         main.runner = old_runner
 
 
-def test_repeat_followup_refusal_stops_without_running_batch():
+def test_crm_failure_is_not_masked_by_successful_shop_phase():
     FakeRepeatBatch.last_run = None
     old_runner = main.runner
     try:
         main.runner = None
-        with patch.object(shop_list_reader_module, 'ShopListReader', FakeRepeatReader), \
+        with patch.object(main, '_run_crm_menu_followup', return_value={
+            'success': False, 'attempted': 1, 'failed': 1,
+        }), \
+             patch.object(shop_list_reader_module, 'ShopListReader', FakeRepeatReader), \
              patch.object(followup_batch_module, 'FollowupBatch', FakeRepeatBatch), \
-             patch.object(main, '_confirm_repeat_followup', return_value=False):
+             patch.object(main, 'DaemonThreadPoolExecutor', FakeExecutor), \
+             patch.object(main, '_make_debug_log', lambda _name: (lambda _msg: None)), \
+             patch.object(main, 'log') as log_mock:
+            result = main._auto_followup_after_login(
+                object(), {
+                    'auto_shop_list': True,
+                    'auto_fill_all': True,
+                    'followup_customer': True,
+                    'followup_shop': True,
+                    'workers': 1,
+                }
+            )
+        content_logs = [
+            call.args[0] for call in log_mock.call_args_list
+            if str(call.args[0]).startswith('\u8ddf\u8fdb\u5185\u5bb9\uff1a')
+        ]
+        assert len(content_logs) == 1
+        assert '\u5ba2\u6237\u9700\u6c42/\u5907\u6ce8\uff1a\u6709\u9700\u8981\u4f1a\u8054\u7cfb' in content_logs[0]
+        assert result['success'] is False
+        assert result['targets']['customer']['success'] is False
+        assert result['targets']['shop']['success'] is True
+    finally:
+        main.runner = old_runner
+
+
+def test_all_done_shops_auto_skip_and_do_not_refuse_batch():
+    FakeRepeatBatch.last_run = None
+    old_runner = main.runner
+
+    class AllDoneReader(FakeRepeatReader):
+        def __init__(self, *_args, **_kwargs):
+            self.shops = [{'shop_id': '1'}]
+
+    try:
+        main.runner = None
+        with patch.object(shop_list_reader_module, 'ShopListReader', AllDoneReader), \
+             patch.object(followup_batch_module, 'FollowupBatch', FakeRepeatBatch), \
+             patch.object(main, 'DaemonThreadPoolExecutor', FakeExecutor), \
+             patch.object(main, '_make_debug_log', lambda _name: (lambda _msg: None)), \
+             patch.object(main, 'log') as log_mock:
             result = main._auto_followup_after_login(
                 object(), {'auto_shop_list': True, 'auto_fill_all': True, 'workers': 1}
             )
-        assert result['success'] is False
-        assert result['refused'] is True
-        assert FakeRepeatBatch.last_run is None
+        assert result['success'] is True
+        assert 'refused' not in result
+        assert FakeRepeatBatch.last_run['shops'] == []
+        assert FakeRepeatBatch.last_run['skip_done'] is False
+        assert any('\u4eca\u65e5\u5df2\u586b\u5199\u8ddf\u8fdb' in str(call.args[0]) for call in log_mock.call_args_list)
     finally:
         main.runner = old_runner
+
 
 def test_log_copy_and_clear_actions():
     root = tk.Tk()
@@ -155,8 +202,12 @@ def test_ui_always_uses_one_worker():
 
 if __name__ == '__main__':
     test_saved_credentials_are_written_and_read_back_from_controls()
-    test_repeat_followup_asks_and_allows_explicit_continue()
-    test_repeat_followup_refusal_stops_without_running_batch()
+    test_repeat_followup_auto_skips_done_shops_without_popup()
+    test_all_done_shops_auto_skip_and_do_not_refuse_batch()
     test_log_copy_and_clear_actions()
     test_ui_always_uses_one_worker()
     print('PASS UI sync and fixed single-thread mode')
+
+
+def test_followup_step_log_uses_readable_chinese_and_shop_total():
+    assert main._followup_batch_step_inputs(30) == '\u5171 30 \u5bb6\uff0c\u5355\u7ebf\u7a0b\u987a\u5e8f\u5904\u7406'

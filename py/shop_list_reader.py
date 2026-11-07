@@ -463,7 +463,6 @@ class ShopListReader:
             wait_until='domcontentloaded',
             timeout=config.NAV_TIMEOUT_MS,
         )
-        self.log('打开：店铺--我的店铺（菜单不可用，已回退到列表页）')
 
     # ---------- 主流程 ----------
     def run(self):
